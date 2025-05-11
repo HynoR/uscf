@@ -96,7 +96,7 @@ func LoadConfig(configPath string) error {
 // GetDefaultSocksConfig 返回默认的SOCKS代理配置
 func GetDefaultSocksConfig() SocksConfig {
 	return SocksConfig{
-		BindAddress:       "0.0.0.0",
+		BindAddress:       "127.0.0.1",
 		Port:              "1080",
 		Username:          "",
 		Password:          "",
