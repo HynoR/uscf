@@ -16,12 +16,18 @@ FROM alpine:latest
 
 WORKDIR /app
 
-# Create etc directory for configuration
-RUN mkdir -p /app/etc
+# Create etc directory for configuration and install required tools
+RUN mkdir -p /app/etc && \
+    apk add --no-cache curl jq
 
 COPY --from=builder /app/uscf /bin/uscf
-# Copy the entrypoint script from the build context
+# Copy the scripts from the build context
 COPY entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh
+COPY healthcheck.sh /app/healthcheck.sh
+RUN chmod +x /app/entrypoint.sh /app/healthcheck.sh
+
+# Add healthcheck
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD /app/healthcheck.sh
 
 ENTRYPOINT ["/app/entrypoint.sh"]
