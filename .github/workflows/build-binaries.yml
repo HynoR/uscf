@@ -1,0 +1,56 @@
+name: Build Binaries
+
+on:
+  push:
+    branches:
+      - dev
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+  pull_request:
+    branches:
+      - dev
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+
+jobs:
+  build:
+    name: Build Binary
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+        include:
+          - os: windows-latest
+            binary_name: usque.exe
+            asset_name: usque-windows-amd64.exe
+          - os: ubuntu-latest
+            binary_name: usque
+            asset_name: usque-linux-amd64
+          - os: macos-latest
+            binary_name: usque
+            asset_name: usque-darwin-amd64
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Build Binary
+        run: |
+          go build -v -o ${{ matrix.binary_name }}
+        
+      - name: Upload Binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ${{ matrix.binary_name }}
+          retention-days: 7
