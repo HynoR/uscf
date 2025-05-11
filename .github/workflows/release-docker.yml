@@ -1,6 +1,12 @@
 name: Build and Publish Release Docker image
 
 on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version number (If not specified, will use value from VERSION file)'
+        required: false
+        type: string
   push:
     paths:
       - 'VERSION'
