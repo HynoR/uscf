@@ -25,16 +25,32 @@ jobs:
     strategy:
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
+        arch: [amd64, arm64]
         include:
           - os: windows-latest
+            arch: amd64
             binary_name: usque.exe
             asset_name: usque-windows-amd64.exe
+          - os: windows-latest
+            arch: arm64
+            binary_name: usque.exe
+            asset_name: usque-windows-arm64.exe
           - os: ubuntu-latest
+            arch: amd64
             binary_name: usque
             asset_name: usque-linux-amd64
+          - os: ubuntu-latest
+            arch: arm64
+            binary_name: usque
+            asset_name: usque-linux-arm64
           - os: macos-latest
+            arch: amd64
             binary_name: usque
             asset_name: usque-darwin-amd64
+          - os: macos-latest
+            arch: arm64
+            binary_name: usque
+            asset_name: usque-darwin-arm64
 
     steps:
       - name: Check out code
@@ -47,23 +63,13 @@ jobs:
           cache: true
 
       - name: Build Binary
+        env:
+          GOARCH: ${{ matrix.arch }}
         run: |
           go build -v -o ${{ matrix.binary_name }}
 
-      - name: Generate Release Tag
-        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
-        id: tag
-        run: |
-          echo "tag=v$(cat VERSION)" >> $env:GITHUB_OUTPUT
-
-      - name: Create Release
-        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
-        uses: softprops/action-gh-release@v1
+      - uses: actions/upload-artifact@v4
         with:
-          name: Dev Build ${{ steps.tag.outputs.tag }}
-          tag_name: ${{ steps.tag.outputs.tag }}
-          files: ${{ matrix.binary_name }}
-          prerelease: true
-          generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: ${{ matrix.asset_name }}
+          path: ${{ matrix.binary_name }}
+          retention-days: 5
