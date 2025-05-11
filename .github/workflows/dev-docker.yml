@@ -10,9 +10,18 @@ on:
       - 'go.sum'
       - 'Dockerfile'
       - 'entrypoint.sh'
+      - '.github/workflows/dev-docker.yml'
   pull_request:
     branches:
       - dev
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Dockerfile'
+      - 'entrypoint.sh'
+      - '.github/workflows/dev-docker.yml'
+  workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io

@@ -20,6 +20,8 @@ jobs:
   build:
     name: Build Binary
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
     strategy:
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
@@ -47,10 +49,21 @@ jobs:
       - name: Build Binary
         run: |
           go build -v -o ${{ matrix.binary_name }}
-        
-      - name: Upload Binary
-        uses: actions/upload-artifact@v4
+
+      - name: Generate Release Tag
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+        id: tag
+        run: |
+          echo "tag=v$(cat VERSION)" >> $env:GITHUB_OUTPUT
+
+      - name: Create Release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+        uses: softprops/action-gh-release@v1
         with:
-          name: ${{ matrix.asset_name }}
-          path: ${{ matrix.binary_name }}
-          retention-days: 7
+          name: Dev Build ${{ steps.tag.outputs.tag }}
+          tag_name: ${{ steps.tag.outputs.tag }}
+          files: ${{ matrix.binary_name }}
+          prerelease: true
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
