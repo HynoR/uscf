@@ -44,8 +44,14 @@ func init() {
 	// 添加重置SOCKS5配置的标志
 	proxyCmd.Flags().Bool("reset-config", false, "Reset SOCKS5 configuration to default values")
 
-	// 添加提示，说明SOCKS配置已移至配置文件
-	proxyCmd.Long += "\n\nNote: All SOCKS proxy settings are now managed through the config file."
+	// 添加SOCKS5代理配置的命令行参数
+	proxyCmd.Flags().StringP("bind-address", "b", "", "Bind address for SOCKS5 proxy (overrides config file)")
+	proxyCmd.Flags().StringP("port", "p", "", "Port for SOCKS5 proxy (overrides config file)")
+	proxyCmd.Flags().StringP("username", "u", "", "Username for SOCKS5 proxy authentication (overrides config file)")
+	proxyCmd.Flags().StringP("password", "w", "", "Password for SOCKS5 proxy authentication (overrides config file)")
+
+	// 添加提示，说明SOCKS配置已移至配置文件，但可通过命令行参数覆盖
+	proxyCmd.Long += "\n\nNote: All SOCKS proxy settings are primarily managed through the config file, but can be overridden with command-line flags."
 
 	// 把 proxyCmd 注册到根命令
 	rootCmd.AddCommand(proxyCmd)
@@ -100,6 +106,45 @@ func runProxyCmd(cmd *cobra.Command, args []string) {
 			return
 		}
 		log.Printf("SOCKS5 configuration has been reset to default values in %s", configPath)
+	}
+
+	// 检查并应用命令行参数覆盖配置文件的值
+	configChanged := false
+
+	// 检查绑定地址
+	if bindAddress, _ := cmd.Flags().GetString("bind-address"); bindAddress != "" {
+		log.Printf("Overriding bind address from command line: %s", bindAddress)
+		config.AppConfig.Socks.BindAddress = bindAddress
+		configChanged = true
+	}
+
+	// 检查端口
+	if port, _ := cmd.Flags().GetString("port"); port != "" {
+		log.Printf("Overriding port from command line: %s", port)
+		config.AppConfig.Socks.Port = port
+		configChanged = true
+	}
+
+	// 检查用户名
+	if username, _ := cmd.Flags().GetString("username"); username != "" {
+		log.Printf("Overriding username from command line")
+		config.AppConfig.Socks.Username = username
+		configChanged = true
+	}
+
+	// 检查密码
+	if password, _ := cmd.Flags().GetString("password"); password != "" {
+		log.Printf("Overriding password from command line")
+		config.AppConfig.Socks.Password = password
+		configChanged = true
+	}
+
+	// 如果配置有变更，保存到配置文件
+	if configChanged {
+		log.Printf("Saving updated configuration to %s", configPath)
+		if err := config.AppConfig.SaveConfig(configPath); err != nil {
+			log.Printf("Warning: Failed to save updated config: %v", err)
+		}
 	}
 
 	// 2. 启动 SOCKS5 代理
