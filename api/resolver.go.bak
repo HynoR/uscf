@@ -1,0 +1,183 @@
+package api
+
+import (
+	"context"
+	"net"
+	"sync"
+	"time"
+)
+
+// DNSCacheEnt		resolver := &net.Resolver{
+			PreferGo: true,
+			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+				d := net.Dialer{Timeout: time.Second * 5}
+				return d.DialContext(ctx, "udp", r.DNSServer)
+			},
+		}
+
+		ips, err := resolver.LookupIP(ctx, "ip", name)
+		if err != nil {
+			resultChan <- dnsLookupResult{nil, err}
+			return
+		}
+
+		if len(ips) == 0 {
+			resultChan <- dnsLookupResult{nil, net.ErrClosed}
+			return
+		}
+
+		// 根据IPv6First设置选择合适的IP地址
+		selectedIP := selectIP(ips, r.IPv6First)
+		resultChan <- dnsLookupResult{selectedIP, nil}NSCacheEntry struct {
+	IP        net.IP
+	ExpiresAt time.Time
+}
+
+// CachingDNSResolver 实现了带缓存的DNS解析器
+type CachingDNSResolver struct {
+	// DNS服务器地址
+	DNSServer string
+	// 缓存过期时间（秒）
+	CacheTTL int
+	// 缓存
+	cache     map[string]DNSCacheEntry
+	cacheLock sync.RWMutex
+	IPv6First bool
+}
+
+// NewCachingDNSResolver 创建一个新的缓存DNS解析器
+// dnsServer: DNS服务器地址，如 "8.8.8.8:53"
+// cacheTTLSeconds: 缓存有效期（秒）
+// ipv6First: 是否优先使用IPv6地址
+func NewCachingDNSResolver(dnsServer string, cacheTTLSeconds int, ipv6First bool) *CachingDNSResolver {
+	if cacheTTLSeconds <= 0 {
+		cacheTTLSeconds = 600 // 默认10分钟
+	}
+
+	if dnsServer == "" {
+		dnsServer = "8.8.8.8:53" // 默认使用谷歌DNS
+	}
+
+	return &CachingDNSResolver{
+		DNSServer: dnsServer,
+		CacheTTL:  cacheTTLSeconds,
+		cache:     make(map[string]DNSCacheEntry),
+		IPv6First: ipv6First,
+	}
+}
+
+type dnsLookupResult struct {
+	ip  net.IP
+	err error
+}
+
+// Resolve 实现NameResolver接口，解析域名为IP地址
+func (r *CachingDNSResolver) Resolve(ctx context.Context, name string) (context.Context, net.IP, error) {
+	// 先检查缓存
+	r.cacheLock.RLock()
+	entry, exists := r.cache[name]
+	now := time.Now()
+	cacheHit := exists && now.Before(entry.ExpiresAt)
+	r.cacheLock.RUnlock()
+
+	// 如果缓存中存在且未过期，直接返回
+	if cacheHit {
+		return ctx, entry.IP, nil
+	}
+
+	// 使用单独锁来防止对同一域名的并发DNS查询，实现"查询合并"
+	resultChan := make(chan dnsLookupResult, 1)
+
+	// 缓存不存在或已过期，进行实际的DNS查询
+	// 这里可以添加错误重试逻辑
+	go func() {
+		resolver := &net.Resolver{
+			PreferGo: true,
+			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+				d := net.Dialer{Timeout: time.Second * 5}
+				return d.DialContext(ctx, "udp", r.DNSServer)
+			},
+		}
+
+		ips, err := resolver.LookupIP(ctx, "ip", name)
+		if err != nil {
+			resultChan <- dnsLookupResult{nil, err}
+			return
+		}
+
+		if len(ips) == 0 {
+			resultChan <- dnsLookupResult{nil, net.ErrClosed}
+			return
+		}
+
+		// 根据IPv6First设置选择合适的IP地址
+		selectedIP := selectIP(ips, r.IPv6First)
+		resultChan <- dnsLookupResult{selectedIP, nil}
+	}()
+
+	// 等待DNS查询完成或上下文取消
+	select {
+	case <-ctx.Done():
+		return ctx, nil, ctx.Err()
+	case result := <-resultChan:
+		if result.err != nil {
+			return ctx, nil, result.err
+		}
+
+		// 更新缓存
+		r.cacheLock.Lock()
+		r.cache[name] = DNSCacheEntry{
+			IP:        result.ip,
+			ExpiresAt: now.Add(time.Duration(r.CacheTTL) * time.Second),
+		}
+		r.cacheLock.Unlock()
+
+		return ctx, result.ip, nil
+	}
+}
+
+// ClearCache 清除DNS缓存
+func (r *CachingDNSResolver) ClearCache() {
+	r.cacheLock.Lock()
+	defer r.cacheLock.Unlock()
+	r.cache = make(map[string]DNSCacheEntry)
+}
+
+// selectIP 根据IPv6First设置选择合适的IP地址
+func selectIP(ips []net.IP, ipv6First bool) net.IP {
+	if len(ips) == 0 {
+		return nil
+	}
+	
+	// 如果不需要IPv6优先，直接返回第一个IP
+	if !ipv6First {
+		return ips[0]
+	}
+	
+	// 分离IPv6和IPv4地址
+	var ipv6Addrs []net.IP
+	var ipv4Addrs []net.IP
+	
+	for _, ip := range ips {
+		if ip.To4() == nil {
+			// IPv6地址
+			ipv6Addrs = append(ipv6Addrs, ip)
+		} else {
+			// IPv4地址
+			ipv4Addrs = append(ipv4Addrs, ip)
+		}
+	}
+	
+	// 如果有IPv6地址并且设置了IPv6优先，则返回第一个IPv6地址
+	if len(ipv6Addrs) > 0 {
+		return ipv6Addrs[0]
+	}
+	
+	// 否则返回第一个IPv4地址（如果有的话）
+	if len(ipv4Addrs) > 0 {
+		return ipv4Addrs[0]
+	}
+	
+	// 如果上面的条件都不满足，返回第一个IP（这种情况理论上不会发生）
+	return ips[0]
+}

@@ -1,0 +1,36 @@
+{
+  "private_key": "MHcCAQEEIEeJQVxrfsNadEHjkBW7RmL6ea62D8LBwBwVwbyndCUtoAoGCCqGSM49AwEHoUQDQgAEUS7G2p45ofY/2HP8Ikrrr9hDJqvllS5mgAkGVGmDV9sLHfEFcOKvKoJecymnAfUrJrV1pGp0DfNmBREh+v51VQ==",
+  "endpoint_v4": "162.159.198.1",
+  "endpoint_v6": "2606:4700:103::1",
+  "endpoint_pub_key": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEIaU7MToJm9NKp8YfGxR6r+/h4mcG\n7SxI8tsW8OR1A5tv/zCzVbCRRh2t87/kxnP6lAy0lkr7qYwu+ox+k3dr6w==\n-----END PUBLIC KEY-----\n",
+  "license": "31hz64kJ-SXDk6048-l851Qz2w",
+  "id": "70718138-655d-41ca-8cf2-253c5bacdea4",
+  "access_token": "51e8723a-571e-4c72-9884-2dcf24214936",
+  "ipv4": "172.16.0.2",
+  "ipv6": "2606:4700:110:81e5:c1f:eaca:e84a:aa84",
+  "socks": {
+    "bind_address": "0.0.0.0",
+    "port": "1080",
+    "username": "",
+    "password": "",
+    "connect_port": 443,
+    "dns": [
+      "1.1.1.1",
+      "8.8.8.8"
+    ],
+    "dns_timeout": 2000000000,
+    "use_ipv6": false,
+    "no_tunnel_ipv4": false,
+    "no_tunnel_ipv6": false,
+    "sni_address": "",
+    "keepalive_period": 30000000000,
+    "mtu": 1280,
+    "initial_packet_size": 1242,
+    "reconnect_delay": 1000000000,
+    "connection_timeout": 30000000000,
+    "idle_timeout": 300000000000
+  },
+  "registration": {
+    "device_name": ""
+  }
+}
