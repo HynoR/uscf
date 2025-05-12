@@ -27,7 +27,7 @@ COPY healthcheck.sh /app/healthcheck.sh
 RUN chmod +x /app/entrypoint.sh /app/healthcheck.sh
 
 # Add healthcheck
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+HEALTHCHECK --interval=150s --timeout=10s --start-period=30s --retries=3 \
     CMD /app/healthcheck.sh
 
 ENTRYPOINT ["/app/entrypoint.sh"]

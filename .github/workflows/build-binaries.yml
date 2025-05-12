@@ -1,21 +1,8 @@
 name: Build Binaries
-
 on:
-  workflow_dispatch:
   push:
-    branches:
-      - dev
-    paths:
-      - '**.go'
-      - 'go.mod'
-      - 'go.sum'
-  pull_request:
-    branches:
-      - dev
-    paths:
-      - '**.go'
-      - 'go.mod'
-      - 'go.sum'
+    tags:
+      - '[0-9]*.[0-9]*'
 
 jobs:
   build:
