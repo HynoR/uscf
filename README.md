@@ -36,7 +36,7 @@ Before you use this tool, you must accept and follow [Cloudflare TOS](https://ww
 The first time you run USCF, it will automatically register a Cloudflare Warp account and create a configuration file:
 
 ```bash
-./uscf proxy
+./uscf proxy -b <bind-addr;default:127.0.0.1> -u <username;default:none> -w <password;default:none> -p <port;default:1080> -c <config.json>
 ```
 
 ### Use Existing Configuration
