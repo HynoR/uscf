@@ -56,7 +56,11 @@ jobs:
 
       - name: Update version in Go code
         run: |
-          sed -i "s/version = \"dev\"/version = \"${{ steps.tag.outputs.VERSION }}\"/g" cmd/version.go
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            sed -i '' "s/version = \"dev\"/version = \"${{ steps.tag.outputs.VERSION }}\"/g" cmd/version.go
+          else
+            sed -i "s/version = \"dev\"/version = \"${{ steps.tag.outputs.VERSION }}\"/g" cmd/version.go
+          fi
         shell: bash
 
       - name: Build Binary
