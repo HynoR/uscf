@@ -50,6 +50,15 @@ jobs:
           go-version-file: 'go.mod'
           cache: true
 
+      - name: Extract tag name
+        id: tag
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Update version in Go code
+        run: |
+          sed -i "s/version = \"dev\"/version = \"${{ steps.tag.outputs.VERSION }}\"/g" cmd/version.go
+        shell: bash
+
       - name: Build Binary
         env:
           GOARCH: ${{ matrix.arch }}
@@ -61,3 +70,41 @@ jobs:
           name: ${{ matrix.asset_name }}
           path: ${{ matrix.binary_name }}
           retention-days: 5
+
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract tag name
+        id: tag
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+
+      - name: Create Release and Upload Assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Create release
+          gh release create ${{ steps.tag.outputs.VERSION }} \
+            --title "Release ${{ steps.tag.outputs.VERSION }}" \
+            --generate-notes
+          
+          # Upload all binary assets
+          for dir in ./artifacts/*/; do
+            asset_name=$(basename "$dir")
+            file_path=$(find "$dir" -type f | head -1)
+            if [ -f "$file_path" ]; then
+              echo "Uploading $asset_name from $file_path"
+              gh release upload ${{ steps.tag.outputs.VERSION }} "$file_path#$asset_name"
+            fi
+          done
