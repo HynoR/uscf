@@ -401,11 +401,30 @@ func runSocksServer(cmd *cobra.Command, tunNet *netstack.Net, connectionTimeout,
 	bindAddress := config.AppConfig.Socks.BindAddress
 	port := config.AppConfig.Socks.Port
 
-	// 创建本地DNS解析器
-	// api.NewCachingDNSResolver需要一个int类型的超时值（秒数）
-	dnsTimeout := config.AppConfig.Socks.DNSTimeout
-	dnsTimeoutSeconds := int(dnsTimeout.Seconds())
-	localResolver := api.NewCachingDNSResolver("", dnsTimeoutSeconds)
+	// 根据配置选择DNS解析器
+	var resolver socks5.NameResolver
+	if config.AppConfig.Socks.RemoteDNS {
+		// 使用TunnelDNSResolver，让DNS通过TUN隧道
+		log.Println("Using remote DNS resolver through TUN tunnel")
+
+		// 解析DNS服务器地址
+		var dnsAddrs []netip.Addr
+		for _, dns := range config.AppConfig.Socks.DNS {
+			addr, err := netip.ParseAddr(dns)
+			if err != nil {
+				return fmt.Errorf("Failed to parse DNS server %s: %v", dns, err)
+			}
+			dnsAddrs = append(dnsAddrs, addr)
+		}
+
+		resolver = api.NewTunnelDNSResolver(tunNet, dnsAddrs, config.AppConfig.Socks.DNSTimeout)
+	} else {
+		// 使用本地DNS解析器
+		log.Println("Using local DNS resolver")
+		dnsTimeout := config.AppConfig.Socks.DNSTimeout
+		dnsTimeoutSeconds := int(dnsTimeout.Seconds())
+		resolver = api.NewCachingDNSResolver("", dnsTimeoutSeconds)
+	}
 
 	// 添加超时设置的拨号函数
 	dialFunc := func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -428,7 +447,7 @@ func runSocksServer(cmd *cobra.Command, tunNet *netstack.Net, connectionTimeout,
 	password := config.AppConfig.Socks.Password
 
 	// 创建SOCKS5服务器
-	server := createSocksServer(username, password, dialFunc, localResolver)
+	server := createSocksServer(username, password, dialFunc, resolver)
 
 	// 启动监听
 	log.Printf("SOCKS proxy listening on %s:%s with timeouts (connect: %s, idle: %s)",
