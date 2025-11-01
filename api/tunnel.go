@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
@@ -255,8 +256,12 @@ func handleForwarding(ctx context.Context, device TunnelDevice, ipConn *connecti
 				icmp, err := ipConn.WritePacket((*buf)[:n])
 				if err != nil {
 					packetBufferPool.PutBuf(buf)
-					errChan <- fmt.Errorf("failed to write to IP connection: %v", err)
-					return
+					if errors.As(err, new(*connectip.CloseError)) {
+						errChan <- fmt.Errorf("connection closed while writing to IP connection: %v", err)
+						return
+					}
+					log.Printf("Error writing to IP connection: %v, continuing...", err)
+					continue
 				}
 				if cap(*buf) < 2*packetBuffCap {
 					packetBufferPool.PutBuf(buf)
@@ -264,8 +269,12 @@ func handleForwarding(ctx context.Context, device TunnelDevice, ipConn *connecti
 
 				if len(icmp) > 0 {
 					if err := device.WritePacket(icmp); err != nil {
-						errChan <- fmt.Errorf("failed to write ICMP to TUN device: %v", err)
-						return
+						if errors.As(err, new(*connectip.CloseError)) {
+							errChan <- fmt.Errorf("failed to write ICMP to TUN device: %v", err)
+							return
+						}
+						log.Printf("Error writing to IP connection: %v, continuing...", err)
+						continue
 					}
 					stats.RecordPacketIn(len(icmp))
 				}
@@ -286,8 +295,12 @@ func handleForwarding(ctx context.Context, device TunnelDevice, ipConn *connecti
 				n, err := ipConn.ReadPacket(*buf, true)
 				if err != nil {
 					packetBufferPool.PutBuf(buf)
-					errChan <- fmt.Errorf("failed to read from IP connection: %v", err)
-					return
+					if errors.As(err, new(*connectip.CloseError)) {
+						errChan <- fmt.Errorf("connection closed while reading from IP connection: %v", err)
+						return
+					}
+					log.Printf("Error reading from IP connection: %v, continuing...", err)
+					continue
 				}
 
 				stats.RecordPacketIn(n)
