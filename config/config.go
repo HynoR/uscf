@@ -40,6 +40,7 @@ type SocksConfig struct {
 	ConnectPort       int           `json:"connect_port"`        // MASQUE连接使用的端口
 	DNS               []string      `json:"dns"`                 // 在MASQUE隧道内使用的DNS服务器
 	DNSTimeout        time.Duration `json:"dns_timeout"`         // DNS查询超时时间（超时后尝试下一个服务器）
+	RemoteDNS         bool          `json:"remote_dns"`          // 是否使用远程DNS（通过TUN隧道），false则使用本地DNS
 	UseIPv6           bool          `json:"use_ipv6"`            // 是否使用IPv6进行MASQUE连接
 	NoTunnelIPv4      bool          `json:"no_tunnel_ipv4"`      // 是否在MASQUE隧道内禁用IPv4
 	NoTunnelIPv6      bool          `json:"no_tunnel_ipv6"`      // 是否在MASQUE隧道内禁用IPv6
@@ -103,6 +104,7 @@ func GetDefaultSocksConfig() SocksConfig {
 		ConnectPort:       443,
 		DNS:               []string{"1.1.1.1", "8.8.8.8"},
 		DNSTimeout:        2 * time.Second,
+		RemoteDNS:         false,
 		UseIPv6:           false,
 		NoTunnelIPv4:      false,
 		NoTunnelIPv6:      false,
