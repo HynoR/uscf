@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"os"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/HynoR/uscf/models"
@@ -423,7 +424,23 @@ func runSocksServer(cmd *cobra.Command, tunNet *netstack.Net, connectionTimeout,
 		log.Println("Using local DNS resolver")
 		dnsTimeout := config.AppConfig.Socks.DNSTimeout
 		dnsTimeoutSeconds := int(dnsTimeout.Seconds())
-		resolver = api.NewCachingDNSResolver("", dnsTimeoutSeconds)
+		if len(config.AppConfig.Socks.DNS) > 0 {
+			// 检查 ip 后有没有端口 如果没有 加上:53
+			ip := config.AppConfig.Socks.DNS[0]
+			if !strings.Contains(ip, ":") {
+				ip = ip + ":53"
+			}
+			resolver = api.NewCachingDNSResolver(
+				ip,
+				dnsTimeoutSeconds,
+			)
+		} else {
+			resolver = api.NewCachingDNSResolver(
+				"8.8.8.8:53",
+				dnsTimeoutSeconds,
+			)
+		}
+
 	}
 
 	// 添加超时设置的拨号函数
