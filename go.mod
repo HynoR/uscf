@@ -6,7 +6,7 @@ require (
 	github.com/Diniboy1123/connect-ip-go v0.0.0-20251011145655-7be32d5976d9
 	github.com/quic-go/quic-go v0.59.0
 	github.com/spf13/cobra v1.9.1
-	github.com/things-go/go-socks5 v0.0.6
+	github.com/things-go/go-socks5 v0.1.0
 	github.com/yosida95/uritemplate/v3 v3.0.2
 	golang.zx2c4.com/wireguard v0.0.0-20250505131008-436f7fdc1670
 )
