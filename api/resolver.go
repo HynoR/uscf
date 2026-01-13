@@ -21,8 +21,10 @@ type DNSCacheEntry struct {
 type CachingDNSResolver struct {
 	// DNS服务器地址
 	DNSServer string
-	// 缓存过期时间（秒）
-	CacheTTL int
+	// 缓存过期时间
+	CacheTTL time.Duration
+	// DNS查询超时
+	Timeout time.Duration
 	// 缓存
 	cache     map[string]DNSCacheEntry
 	cacheLock sync.RWMutex
@@ -30,19 +32,22 @@ type CachingDNSResolver struct {
 
 // NewCachingDNSResolver 创建一个新的缓存DNS解析器
 // dnsServer: DNS服务器地址，如 "8.8.8.8:53"
-// cacheTTLSeconds: 缓存有效期（秒）
-func NewCachingDNSResolver(dnsServer string, cacheTTLSeconds int) *CachingDNSResolver {
-	if cacheTTLSeconds <= 0 {
-		cacheTTLSeconds = 600 // 默认10分钟
-	}
+// timeout: DNS查询超时
+func NewCachingDNSResolver(dnsServer string, timeout time.Duration) *CachingDNSResolver {
+	cacheTTL := 10 * time.Minute
 
 	if dnsServer == "" {
 		dnsServer = "8.8.8.8:53" // 默认使用谷歌DNS
 	}
 
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+
 	return &CachingDNSResolver{
 		DNSServer: dnsServer,
-		CacheTTL:  cacheTTLSeconds,
+		CacheTTL:  cacheTTL,
+		Timeout:   timeout,
 		cache:     make(map[string]DNSCacheEntry),
 	}
 }
@@ -72,15 +77,22 @@ func (r *CachingDNSResolver) Resolve(ctx context.Context, name string) (context.
 	// 缓存不存在或已过期，进行实际的DNS查询
 	// 这里可以添加错误重试逻辑
 	go func() {
+		lookupCtx := ctx
+		if r.Timeout > 0 {
+			var cancel context.CancelFunc
+			lookupCtx, cancel = context.WithTimeout(ctx, r.Timeout)
+			defer cancel()
+		}
+
 		resolver := &net.Resolver{
 			PreferGo: true,
 			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-				d := net.Dialer{Timeout: time.Second * 5}
+				d := net.Dialer{Timeout: r.Timeout}
 				return d.DialContext(ctx, "udp", r.DNSServer)
 			},
 		}
 
-		ips, err := resolver.LookupIP(ctx, "ip", name)
+		ips, err := resolver.LookupIP(lookupCtx, "ip", name)
 		if err != nil {
 			resultChan <- dnsLookupResult{nil, err}
 			return
@@ -107,7 +119,7 @@ func (r *CachingDNSResolver) Resolve(ctx context.Context, name string) (context.
 		r.cacheLock.Lock()
 		r.cache[name] = DNSCacheEntry{
 			IP:        result.ip,
-			ExpiresAt: now.Add(time.Duration(r.CacheTTL) * time.Second),
+			ExpiresAt: now.Add(r.CacheTTL),
 		}
 		r.cacheLock.Unlock()
 
@@ -165,6 +177,11 @@ func (r TunnelDNSResolver) Resolve(ctx context.Context, name string) (context.Co
 
 	for _, dnsAddr := range r.dnsAddrs {
 		dnsHost := net.JoinHostPort(dnsAddr.String(), "53")
+		lookupCtx := ctx
+		var cancel context.CancelFunc
+		if r.timeout > 0 {
+			lookupCtx, cancel = context.WithTimeout(ctx, r.timeout)
+		}
 
 		resolver := &net.Resolver{
 			PreferGo: true,
@@ -173,7 +190,10 @@ func (r TunnelDNSResolver) Resolve(ctx context.Context, name string) (context.Co
 			},
 		}
 
-		ips, err := resolver.LookupIP(ctx, "ip", name)
+		ips, err := resolver.LookupIP(lookupCtx, "ip", name)
+		if cancel != nil {
+			cancel()
+		}
 		if err == nil && len(ips) > 0 {
 			return ctx, ips[0], nil
 		}

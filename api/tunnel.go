@@ -17,6 +17,10 @@ import (
 	"golang.zx2c4.com/wireguard/tun"
 )
 
+// packetBuffCap is the standard packet buffer capacity.
+// 2*packetBuffCap serves as a soft cap threshold for returning buffers to the pool,
+// preventing accidentally enlarged buffers from polluting the pool and causing memory bloat (pool poisoning).
+// Production MTU < 1536, threshold 4096 provides sufficient headroom.
 const packetBuffCap = 2048
 
 var packetBufferPool *NetBuffer
@@ -263,6 +267,7 @@ func handleForwarding(ctx context.Context, device TunnelDevice, ipConn *connecti
 					log.Printf("Error writing to IP connection: %v, continuing...", err)
 					continue
 				}
+				// Soft cap: buffers exceeding 2*packetBuffCap are not returned to pool, letting GC reclaim them to prevent pool poisoning
 				if cap(*buf) < 2*packetBuffCap {
 					packetBufferPool.PutBuf(buf)
 				}
@@ -309,6 +314,7 @@ func handleForwarding(ctx context.Context, device TunnelDevice, ipConn *connecti
 					errChan <- fmt.Errorf("failed to write to TUN device: %v", err)
 					return
 				}
+				// Soft cap: buffers exceeding 2*packetBuffCap are not returned to pool, letting GC reclaim them to prevent pool poisoning
 				if cap(*buf) < 2*packetBuffCap {
 					packetBufferPool.PutBuf(buf)
 				}

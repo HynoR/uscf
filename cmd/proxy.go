@@ -423,7 +423,6 @@ func runSocksServer(cmd *cobra.Command, tunNet *netstack.Net, connectionTimeout,
 		// 使用本地DNS解析器
 		log.Println("Using local DNS resolver")
 		dnsTimeout := config.AppConfig.Socks.DNSTimeout
-		dnsTimeoutSeconds := int(dnsTimeout.Seconds())
 		if len(config.AppConfig.Socks.DNS) > 0 {
 			// 检查 ip 后有没有端口 如果没有 加上:53
 			ip := config.AppConfig.Socks.DNS[0]
@@ -432,12 +431,12 @@ func runSocksServer(cmd *cobra.Command, tunNet *netstack.Net, connectionTimeout,
 			}
 			resolver = api.NewCachingDNSResolver(
 				ip,
-				dnsTimeoutSeconds,
+				dnsTimeout,
 			)
 		} else {
 			resolver = api.NewCachingDNSResolver(
 				"8.8.8.8:53",
-				dnsTimeoutSeconds,
+				dnsTimeout,
 			)
 		}
 
