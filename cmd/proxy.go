@@ -323,9 +323,19 @@ func prepareNetworkConfig(cmd *cobra.Command) (*net.UDPAddr, []netip.Addr, []net
 	// DNS设置
 	var dnsAddrs []netip.Addr
 	for _, dns := range config.AppConfig.Socks.DNS {
-		addr, err := netip.ParseAddr(dns)
+		// 如果DNS服务器地址包含端口，则只提取IP部分
+		host := dns
+		if strings.Contains(dns, ":") {
+			var err error
+			host, _, err = net.SplitHostPort(dns)
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("Failed to parse DNS server %s: %v", dns, err)
+			}
+		}
+
+		addr, err := netip.ParseAddr(host)
 		if err != nil {
-			return nil, nil, nil, fmt.Errorf("Failed to parse DNS server: %v", err)
+			return nil, nil, nil, fmt.Errorf("Failed to parse DNS server IP %s: %v", host, err)
 		}
 		dnsAddrs = append(dnsAddrs, addr)
 	}
@@ -408,17 +418,17 @@ func runSocksServer(cmd *cobra.Command, tunNet *netstack.Net, connectionTimeout,
 		// 使用TunnelDNSResolver，让DNS通过TUN隧道
 		log.Println("Using remote DNS resolver through TUN tunnel")
 
-		// 解析DNS服务器地址
-		var dnsAddrs []netip.Addr
+		// 解析DNS服务器地址（可能包含端口）
+		var dnsServers []string
 		for _, dns := range config.AppConfig.Socks.DNS {
-			addr, err := netip.ParseAddr(dns)
-			if err != nil {
-				return fmt.Errorf("Failed to parse DNS server %s: %v", dns, err)
+			// 检查是否已经包含端口，如果没有则添加默认端口53
+			if !strings.Contains(dns, ":") {
+				dns = dns + ":53"
 			}
-			dnsAddrs = append(dnsAddrs, addr)
+			dnsServers = append(dnsServers, dns)
 		}
 
-		resolver = api.NewTunnelDNSResolver(tunNet, dnsAddrs, config.AppConfig.Socks.DNSTimeout)
+		resolver = api.NewTunnelDNSResolver(tunNet, dnsServers, config.AppConfig.Socks.DNSTimeout)
 	} else {
 		// 使用本地DNS解析器
 		log.Println("Using local DNS resolver")

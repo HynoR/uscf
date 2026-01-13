@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"net/netip"
 	"sync"
 	"time"
 
@@ -126,8 +125,8 @@ func (r *CachingDNSResolver) ClearCache() {
 type TunnelDNSResolver struct {
 	// tunNet is the network stack for the tunnel you want to use for DNS resolution.
 	tunNet *netstack.Net
-	// dnsAddrs is the list of DNS servers to use for resolution.
-	dnsAddrs []netip.Addr
+	// dnsServers is the list of DNS servers (with ports) to use for resolution.
+	dnsServers []string
 	// timeout is the timeout for DNS queries on a specific server before trying the next one.
 	timeout time.Duration
 }
@@ -136,16 +135,16 @@ type TunnelDNSResolver struct {
 //
 // Parameters:
 //   - tunNet: *netstack.Net - The network stack for the tunnel.
-//   - dnsAddrs: []netip.Addr - The list of DNS servers to use for resolution.
+//   - dnsServers: []string - The list of DNS servers (IP:port format) to use for resolution.
 //   - timeout: time.Duration - The timeout for DNS queries on a specific server before trying the next one.
 //
 // Returns:
 //   - *TunnelDNSResolver: The newly created TunnelDNSResolver.
-func NewTunnelDNSResolver(tunNet *netstack.Net, dnsAddrs []netip.Addr, timeout time.Duration) *TunnelDNSResolver {
+func NewTunnelDNSResolver(tunNet *netstack.Net, dnsServers []string, timeout time.Duration) *TunnelDNSResolver {
 	return &TunnelDNSResolver{
-		tunNet:   tunNet,
-		dnsAddrs: dnsAddrs,
-		timeout:  timeout,
+		tunNet:     tunNet,
+		dnsServers: dnsServers,
+		timeout:    timeout,
 	}
 }
 
@@ -163,13 +162,11 @@ func NewTunnelDNSResolver(tunNet *netstack.Net, dnsAddrs []netip.Addr, timeout t
 func (r TunnelDNSResolver) Resolve(ctx context.Context, name string) (context.Context, net.IP, error) {
 	var lastErr error
 
-	for _, dnsAddr := range r.dnsAddrs {
-		dnsHost := net.JoinHostPort(dnsAddr.String(), "53")
-
+	for _, dnsServer := range r.dnsServers {
 		resolver := &net.Resolver{
 			PreferGo: true,
 			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-				return r.tunNet.DialContext(ctx, "udp", dnsHost)
+				return r.tunNet.DialContext(ctx, "udp", dnsServer)
 			},
 		}
 
