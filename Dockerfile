@@ -9,7 +9,10 @@ RUN go mod download
 
 COPY . .
 
-RUN go build -o uscf -ldflags="-s -w" .
+ENV GOEXPERIMENT=greenteagc
+ENV CGO_ENABLED=0
+
+RUN go build -trimpath -o uscf -ldflags="-s -w" .
 
 # scratch won't be enough, because we need a cert store
 FROM alpine:latest
