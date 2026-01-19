@@ -44,6 +44,7 @@ type SocksConfig struct {
 	UseIPv6           bool          `json:"use_ipv6"`            // 是否使用IPv6进行MASQUE连接
 	NoTunnelIPv4      bool          `json:"no_tunnel_ipv4"`      // 是否在MASQUE隧道内禁用IPv4
 	NoTunnelIPv6      bool          `json:"no_tunnel_ipv6"`      // 是否在MASQUE隧道内禁用IPv6
+	BlockUDP443       bool          `json:"block_udp_443"`       // Whether to block outbound UDP/443 (QUIC)
 	SNIAddress        string        `json:"sni_address"`         // MASQUE连接使用的SNI地址
 	KeepalivePeriod   time.Duration `json:"keepalive_period"`    // MASQUE连接的心跳周期
 	MTU               int           `json:"mtu"`                 // MASQUE连接的MTU
@@ -108,6 +109,7 @@ func GetDefaultSocksConfig() SocksConfig {
 		UseIPv6:           false,
 		NoTunnelIPv4:      false,
 		NoTunnelIPv6:      false,
+		BlockUDP443:       false,
 		SNIAddress:        "", // 这应当从internal.ConnectSNI读取，但现在我们不修改其他文件
 		KeepalivePeriod:   30 * time.Second,
 		MTU:               1280,

@@ -459,6 +459,13 @@ func runSocksServer(cmd *cobra.Command, tunNet *netstack.Net, connectionTimeout,
 
 	// 添加超时设置的拨号函数
 	dialFunc := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if config.AppConfig.Socks.BlockUDP443 && strings.HasPrefix(network, "udp") {
+			_, port, err := net.SplitHostPort(addr)
+			if err == nil && port == "443" {
+				return nil, fmt.Errorf("udp/443 blocked by config")
+			}
+		}
+
 		dialCtx, cancel := context.WithTimeout(ctx, connectionTimeout)
 		defer cancel()
 
