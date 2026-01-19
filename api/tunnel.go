@@ -91,15 +91,15 @@ type TunnelDevice interface {
 }
 
 // TunnelStats 用于跟踪隧道性能指标
+// 所有字段都使用原子操作，无需加锁
 type TunnelStats struct {
-	PacketsIn     uint64
-	PacketsOut    uint64
-	BytesIn       uint64
-	BytesOut      uint64
-	Errors        uint64
-	HandShake     uint64
-	LastReconnect time.Time
-	mu            sync.Mutex
+	PacketsIn       uint64
+	PacketsOut      uint64
+	BytesIn         uint64
+	BytesOut        uint64
+	Errors          uint64
+	HandShake       uint64
+	LastReconnectNs int64 // Unix 纳秒时间戳
 }
 
 func (s *TunnelStats) RecordPacketIn(bytes int) {
@@ -117,10 +117,17 @@ func (s *TunnelStats) RecordError() {
 }
 
 func (s *TunnelStats) RecordHandShake() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.HandShake++
-	s.LastReconnect = time.Now()
+	atomic.AddUint64(&s.HandShake, 1)
+	atomic.StoreInt64(&s.LastReconnectNs, time.Now().UnixNano())
+}
+
+// GetLastReconnect 返回最后一次重连的时间
+func (s *TunnelStats) GetLastReconnect() time.Time {
+	ns := atomic.LoadInt64(&s.LastReconnectNs)
+	if ns == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, ns)
 }
 
 // NetstackAdapter wraps a tun.Device (e.g. from netstack) to satisfy TunnelDevice.
@@ -132,15 +139,11 @@ type NetstackAdapter struct {
 
 func (n *NetstackAdapter) ReadPacket(buf []byte) (int, error) {
 
-	//packetBuf := packetBufferPool.GetBuf(buf).([]byte)
-
-	// 修改这一行
 	packetBufs := n.packetBufsPool.Get().(*[][]byte)
 	sizes := n.sizesPool.Get().(*[]int)
 
-	// 确保在函数结束时将切片归还到对象池
 	defer func() {
-		(*packetBufs)[0] = nil // 避免内存泄漏
+		(*packetBufs)[0] = nil
 		n.packetBufsPool.Put(packetBufs)
 		n.sizesPool.Put(sizes)
 	}()
@@ -190,6 +193,7 @@ type ConnectionConfig struct {
 	MaxPacketRate     float64 // 每秒最大数据包处理速率
 	MaxBurst          int     // 突发处理数据包的最大数量
 	ReconnectStrategy BackoffStrategy
+	OnConnected       func() // Optional callback after MASQUE connection is established.
 }
 
 // BackoffStrategy 定义重连策略接口
@@ -237,11 +241,11 @@ func (b *ExponentialBackoff) Reset() {
 func handleForwarding(ctx context.Context, device TunnelDevice, ipConn *connectip.Conn, stats *TunnelStats) error {
 	errChan := make(chan error, 2)
 	ctx, cancel := context.WithCancel(ctx)
-	defer cancel() // 确保在函数退出时取消上下文
+	defer cancel()
 
 	// 从设备到IP连接的转发
 	go func() {
-		defer cancel() // 确保在goroutine退出时取消上下文
+		defer cancel()
 		for {
 			select {
 			case <-ctx.Done():
@@ -289,7 +293,7 @@ func handleForwarding(ctx context.Context, device TunnelDevice, ipConn *connecti
 
 	// 从IP连接到设备的转发
 	go func() {
-		defer cancel() // 确保在goroutine退出时取消上下文
+		defer cancel()
 		for {
 			select {
 			case <-ctx.Done():
@@ -341,8 +345,15 @@ func monitorStats(ctx context.Context, stats *TunnelStats) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			packetsIn := atomic.LoadUint64(&stats.PacketsIn)
+			packetsOut := atomic.LoadUint64(&stats.PacketsOut)
+			bytesIn := atomic.LoadUint64(&stats.BytesIn)
+			bytesOut := atomic.LoadUint64(&stats.BytesOut)
+			errors := atomic.LoadUint64(&stats.Errors)
+			handShake := atomic.LoadUint64(&stats.HandShake)
+
 			log.Printf("Tunnel stats: In: %d pkts (%d bytes), Out: %d pkts (%d bytes), Errors: %d, HandShake: %d",
-				stats.PacketsIn, stats.BytesIn, stats.PacketsOut, stats.BytesOut, stats.Errors, stats.HandShake)
+				packetsIn, bytesIn, packetsOut, bytesOut, errors, handShake)
 		}
 	}
 }
@@ -382,15 +393,15 @@ func handleConnection(ctx context.Context, config ConnectionConfig, device Tunne
 
 	stats.RecordHandShake()
 	log.Println("Connected to MASQUE server")
+	if config.OnConnected != nil {
+		config.OnConnected()
+	}
 
 	// 创建子上下文用于转发
 	forwardingCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// 启动监控统计
 	go monitorStats(forwardingCtx, stats)
-
-	// 处理转发
 
 	if err = handleForwarding(forwardingCtx, device, ipConn, stats); err != nil {
 		log.Printf("Forwarding error: %v", err)
