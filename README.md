@@ -104,7 +104,8 @@ The Config file is merge from usque's flags and configs, You can find the descri
     "initial_packet_size": 1242,
     "reconnect_delay": 1000000000,
     "connection_timeout": 30000000000,
-    "idle_timeout": 300000000000
+    "idle_timeout": 300000000000,
+    "self_check": false
   },
   "registration": {
     "device_name": "Device name"
