@@ -97,6 +97,7 @@ The Config file is merge from usque's flags and configs, You can find the descri
     "use_ipv6": false,
     "no_tunnel_ipv4": false,
     "no_tunnel_ipv6": false,
+    "block_udp_443": false,
     "sni_address": "",
     "keepalive_period": 30000000000,
     "mtu": 1280,

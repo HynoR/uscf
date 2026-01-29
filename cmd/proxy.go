@@ -11,6 +11,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/HynoR/uscf/models"
@@ -224,7 +225,7 @@ func handleRegistration(cmd *cobra.Command, configPath string) error {
 
 // setupAndRunSocksProxy 设置并运行SOCKS5代理
 func setupAndRunSocksProxy(cmd *cobra.Command) error {
-	log.Println("Starting SOCKS5 proxy...")
+	log.Println("Preparing SOCKS5 proxy...")
 
 	// 设置最大并发处理能力
 	runtime.GOMAXPROCS(runtime.NumCPU())
@@ -252,7 +253,11 @@ func setupAndRunSocksProxy(cmd *cobra.Command) error {
 	defer tunDev.Close()
 
 	// 配置连接并启动隧道
-	startTunnel(cmd, tlsConfig, endpoint, tunDev)
+	readyCh := startTunnel(cmd, tlsConfig, endpoint, tunDev)
+
+	log.Println("Waiting for MASQUE connection before starting SOCKS5 proxy...")
+	<-readyCh
+	log.Println("MASQUE connection established. Starting SOCKS5 proxy listener...")
 
 	// 创建并启动SOCKS服务器
 	return runSocksServer(cmd, tunNet, connectionTimeout, idleTimeout)
@@ -367,7 +372,10 @@ func createTunDevice(localAddresses, dnsAddrs []netip.Addr, cmd *cobra.Command) 
 }
 
 // startTunnel 配置并启动隧道连接
-func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint *net.UDPAddr, tunDev tun.Device) {
+func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint *net.UDPAddr, tunDev tun.Device) <-chan struct{} {
+	readyCh := make(chan struct{})
+	var readyOnce sync.Once
+
 	// 从配置文件读取隧道参数
 	keepalivePeriod := config.AppConfig.Socks.KeepalivePeriod
 	initialPacketSize := config.AppConfig.Socks.InitialPacketSize
@@ -387,6 +395,11 @@ func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint *net.UDPAdd
 			MaxDelay:     5 * time.Minute,
 			Factor:       2.0,
 		},
+		OnConnected: func() {
+			readyOnce.Do(func() {
+				close(readyCh)
+			})
+		},
 	}
 
 	go api.MaintainTunnel(
@@ -394,6 +407,8 @@ func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint *net.UDPAdd
 		configTunnel,
 		api.NewNetstackAdapter(tunDev),
 	)
+
+	return readyCh
 }
 
 // runSocksServer 创建并运行SOCKS5服务器
@@ -444,6 +459,13 @@ func runSocksServer(cmd *cobra.Command, tunNet *netstack.Net, connectionTimeout,
 
 	// 添加超时设置的拨号函数
 	dialFunc := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if config.AppConfig.Socks.BlockUDP443 && strings.HasPrefix(network, "udp") {
+			_, port, err := net.SplitHostPort(addr)
+			if err == nil && port == "443" {
+				return nil, fmt.Errorf("udp/443 blocked by config")
+			}
+		}
+
 		dialCtx, cancel := context.WithTimeout(ctx, connectionTimeout)
 		defer cancel()
 
