@@ -23,6 +23,12 @@ import (
 // Production MTU < 1536, threshold 4096 provides sufficient headroom.
 const packetBuffCap = 2048
 
+const (
+	forwardingErrStreakThreshold = 5
+	forwardingErrBackoffBase     = 50 * time.Millisecond
+	forwardingErrBackoffMax      = 2 * time.Second
+)
+
 var packetBufferPool *NetBuffer
 
 // NetBuffer is a pool of byte slices with a fixed capacity.
@@ -237,6 +243,27 @@ func (b *ExponentialBackoff) Reset() {
 	// 重置状态（如果需要）
 }
 
+func sleepWithBackoff(ctx context.Context, backoff *time.Duration) bool {
+	if *backoff <= 0 {
+		*backoff = forwardingErrBackoffBase
+	} else if *backoff < forwardingErrBackoffMax {
+		*backoff *= 2
+		if *backoff > forwardingErrBackoffMax {
+			*backoff = forwardingErrBackoffMax
+		}
+	}
+
+	timer := time.NewTimer(*backoff)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
 // handleForwarding 处理数据包的转发
 func handleForwarding(ctx context.Context, device TunnelDevice, ipConn *connectip.Conn, stats *TunnelStats) error {
 	errChan := make(chan error, 2)
@@ -246,6 +273,8 @@ func handleForwarding(ctx context.Context, device TunnelDevice, ipConn *connecti
 	// 从设备到IP连接的转发
 	go func() {
 		defer cancel()
+		errStreak := 0
+		var backoff time.Duration
 		for {
 			select {
 			case <-ctx.Done():
@@ -268,9 +297,21 @@ func handleForwarding(ctx context.Context, device TunnelDevice, ipConn *connecti
 						errChan <- fmt.Errorf("connection closed while writing to IP connection: %v", err)
 						return
 					}
-					log.Printf("Error writing to IP connection: %v, continuing...", err)
+					errStreak++
+					if errStreak >= forwardingErrStreakThreshold {
+						errChan <- fmt.Errorf("too many write errors to IP connection: %w", err)
+						return
+					}
+					if errStreak == 1 {
+						log.Printf("Error writing to IP connection: %v (streak %d)", err, errStreak)
+					}
+					if !sleepWithBackoff(ctx, &backoff) {
+						return
+					}
 					continue
 				}
+				errStreak = 0
+				backoff = 0
 				// Soft cap: buffers exceeding 2*packetBuffCap are not returned to pool, letting GC reclaim them to prevent pool poisoning
 				if cap(*buf) < 2*packetBuffCap {
 					packetBufferPool.PutBuf(buf)
@@ -294,6 +335,8 @@ func handleForwarding(ctx context.Context, device TunnelDevice, ipConn *connecti
 	// 从IP连接到设备的转发
 	go func() {
 		defer cancel()
+		errStreak := 0
+		var backoff time.Duration
 		for {
 			select {
 			case <-ctx.Done():
@@ -308,9 +351,21 @@ func handleForwarding(ctx context.Context, device TunnelDevice, ipConn *connecti
 						errChan <- fmt.Errorf("connection closed while reading from IP connection: %v", err)
 						return
 					}
-					log.Printf("Error reading from IP connection: %v, continuing...", err)
+					errStreak++
+					if errStreak >= forwardingErrStreakThreshold {
+						errChan <- fmt.Errorf("too many read errors from IP connection: %w", err)
+						return
+					}
+					if errStreak == 1 {
+						log.Printf("Error reading from IP connection: %v (streak %d)", err, errStreak)
+					}
+					if !sleepWithBackoff(ctx, &backoff) {
+						return
+					}
 					continue
 				}
+				errStreak = 0
+				backoff = 0
 
 				stats.RecordPacketIn(n)
 				if err := device.WritePacket((*buf)[:n]); err != nil {

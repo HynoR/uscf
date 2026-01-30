@@ -417,6 +417,10 @@ func runSocksServer(cmd *cobra.Command, tunNet *netstack.Net, connectionTimeout,
 	bindAddress := config.AppConfig.Socks.BindAddress
 	port := config.AppConfig.Socks.Port
 
+	if config.AppConfig.Socks.BlockUDP443 {
+		log.Println("UDP/443 blocking is enabled: outbound QUIC/UDP will be rejected")
+	}
+
 	// 根据配置选择DNS解析器
 	var resolver socks5.NameResolver
 	if config.AppConfig.Socks.RemoteDNS {
