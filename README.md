@@ -50,6 +50,11 @@ If you already have a configuration file, run directly:
 
 ## Docker Deployment
 
+### Use Online build version
+``` bash
+docker run -d   --name uscf   --network=host   -v /etc/uscf/:/app/etc/   --log-driver json-file   --log-opt max-size=3m   --restart on-failure   --privileged   ghcr.io/hynor/uscf
+```
+
 ### Build Docker Image
 
 ```bash
