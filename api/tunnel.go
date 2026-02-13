@@ -198,6 +198,8 @@ type ConnectionConfig struct {
 	MTU               int
 	MaxPacketRate     float64 // 每秒最大数据包处理速率
 	MaxBurst          int     // 突发处理数据包的最大数量
+	SelfCheckEnabled  bool
+	SelfCheckDialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
 	ReconnectStrategy BackoffStrategy
 	OnConnected       func() // Optional callback after MASQUE connection is established.
 }
@@ -458,12 +460,37 @@ func handleConnection(ctx context.Context, config ConnectionConfig, device Tunne
 
 	go monitorStats(forwardingCtx, stats)
 
-	if err = handleForwarding(forwardingCtx, device, ipConn, stats); err != nil {
-		log.Printf("Forwarding error: %v", err)
-		stats.RecordError()
+	forwardingErrCh := make(chan error, 1)
+	go func() {
+		forwardingErrCh <- handleForwarding(forwardingCtx, device, ipConn, stats)
+	}()
+
+	var selfCheckErrCh <-chan error
+	if config.SelfCheckEnabled {
+		ch := make(chan error, 1)
+		selfCheckErrCh = ch
+		go func() {
+			ch <- runSelfCheckLoop(forwardingCtx, config.SelfCheckDialFunc)
+		}()
 	}
 
-	return 0, err
+	select {
+	case err = <-forwardingErrCh:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("Forwarding error: %v", err)
+			stats.RecordError()
+		}
+		return 0, err
+	case err = <-selfCheckErrCh:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("Self-check triggered reconnect: %v", err)
+			stats.RecordError()
+		}
+		cancel()
+		return 0, err
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	}
 }
 
 func MaintainTunnel(ctx context.Context, config ConnectionConfig, device TunnelDevice) {

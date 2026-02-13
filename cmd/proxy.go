@@ -253,7 +253,7 @@ func setupAndRunSocksProxy(cmd *cobra.Command) error {
 	defer tunDev.Close()
 
 	// 配置连接并启动隧道
-	readyCh := startTunnel(cmd, tlsConfig, endpoint, tunDev)
+	readyCh := startTunnel(cmd, tlsConfig, endpoint, tunDev, tunNet)
 
 	log.Println("Waiting for MASQUE connection before starting SOCKS5 proxy...")
 	<-readyCh
@@ -372,7 +372,7 @@ func createTunDevice(localAddresses, dnsAddrs []netip.Addr, cmd *cobra.Command) 
 }
 
 // startTunnel 配置并启动隧道连接
-func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint *net.UDPAddr, tunDev tun.Device) <-chan struct{} {
+func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint *net.UDPAddr, tunDev tun.Device, tunNet *netstack.Net) <-chan struct{} {
 	readyCh := make(chan struct{})
 	var readyOnce sync.Once
 
@@ -390,6 +390,8 @@ func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint *net.UDPAdd
 		MTU:               mtu,
 		MaxPacketRate:     8192,
 		MaxBurst:          1024,
+		SelfCheckEnabled:  config.AppConfig.Socks.SelfCheck,
+		SelfCheckDialFunc: tunNet.DialContext,
 		ReconnectStrategy: &api.ExponentialBackoff{
 			InitialDelay: reconnectDelay,
 			MaxDelay:     5 * time.Minute,

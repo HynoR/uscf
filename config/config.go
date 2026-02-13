@@ -52,6 +52,7 @@ type SocksConfig struct {
 	ReconnectDelay    time.Duration `json:"reconnect_delay"`     // 重连尝试之间的延迟
 	ConnectionTimeout time.Duration `json:"connection_timeout"`  // 建立连接的超时时间
 	IdleTimeout       time.Duration `json:"idle_timeout"`        // 空闲连接的超时时间
+	SelfCheck         bool          `json:"self_check"`          // 是否启用隧道自检并在连续失败后重连
 }
 
 // RegistrationInfo 包含注册相关的信息
@@ -117,6 +118,7 @@ func GetDefaultSocksConfig() SocksConfig {
 		ReconnectDelay:    1 * time.Second,
 		ConnectionTimeout: 30 * time.Second,
 		IdleTimeout:       5 * time.Minute,
+		SelfCheck:         false,
 	}
 }
 
