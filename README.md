@@ -72,6 +72,8 @@ USCF uses a JSON format configuration file. The default configuration file path 
 After Automatic Registration, You would get a config.json like the example below, you can edit items and then restart your program to apply them.
 The Config file is merge from usque's flags and configs, You can find the description of config items from usque.
 
+Time options (`dns_timeout`, `keepalive_period`, `reconnect_delay`, `connection_timeout`, `idle_timeout`) use human-readable strings: unit suffixes are `ns`, `us`/`µs`, `ms`, `s`, `m`, `h` (e.g. `"2s"`, `"5m"`, `"1h30m"`). Legacy configs with numeric nanosecond values are still accepted.
+
 ```json
 {
   "private_key": "BASE64 encoded ECDSA private key(Auto Generate)",
@@ -93,18 +95,18 @@ The Config file is merge from usque's flags and configs, You can find the descri
       "1.1.1.1",
       "8.8.8.8"
     ],
-    "dns_timeout": 2000000000,
+    "dns_timeout": "2s",
     "use_ipv6": false,
     "no_tunnel_ipv4": false,
     "no_tunnel_ipv6": false,
-    "block_udp_443": false,
+    "block_udp_443": true,
     "sni_address": "",
-    "keepalive_period": 30000000000,
+    "keepalive_period": "30s",
     "mtu": 1280,
     "initial_packet_size": 1242,
-    "reconnect_delay": 1000000000,
-    "connection_timeout": 30000000000,
-    "idle_timeout": 300000000000,
+    "reconnect_delay": "1s",
+    "connection_timeout": "30s",
+    "idle_timeout": "5m",
     "self_check": false
   },
   "registration": {

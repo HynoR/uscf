@@ -341,8 +341,8 @@ func prepareNetworkConfig(cmd *cobra.Command) (*net.UDPAddr, []netip.Addr, []net
 // getTimeoutSettings 获取超时设置
 func getTimeoutSettings(cmd *cobra.Command) (time.Duration, time.Duration) {
 	// 直接从配置文件中读取超时设置
-	connectionTimeout := config.AppConfig.Socks.ConnectionTimeout
-	idleTimeout := config.AppConfig.Socks.IdleTimeout
+	connectionTimeout := config.AppConfig.Socks.ConnectionTimeout.Duration()
+	idleTimeout := config.AppConfig.Socks.IdleTimeout.Duration()
 
 	// 确保设置了默认值
 	if connectionTimeout == 0 {
@@ -377,10 +377,10 @@ func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint *net.UDPAdd
 	var readyOnce sync.Once
 
 	// 从配置文件读取隧道参数
-	keepalivePeriod := config.AppConfig.Socks.KeepalivePeriod
+	keepalivePeriod := config.AppConfig.Socks.KeepalivePeriod.Duration()
 	initialPacketSize := config.AppConfig.Socks.InitialPacketSize
 	mtu := config.AppConfig.Socks.MTU
-	reconnectDelay := config.AppConfig.Socks.ReconnectDelay
+	reconnectDelay := config.AppConfig.Socks.ReconnectDelay.Duration()
 
 	configTunnel := api.ConnectionConfig{
 		TLSConfig:         tlsConfig,
@@ -439,11 +439,11 @@ func runSocksServer(cmd *cobra.Command, tunNet *netstack.Net, connectionTimeout,
 			dnsAddrs = append(dnsAddrs, addr)
 		}
 
-		resolver = api.NewTunnelDNSResolver(tunNet, dnsAddrs, config.AppConfig.Socks.DNSTimeout)
+		resolver = api.NewTunnelDNSResolver(tunNet, dnsAddrs, config.AppConfig.Socks.DNSTimeout.Duration())
 	} else {
 		// 使用本地DNS解析器
 		log.Println("Using local DNS resolver")
-		dnsTimeout := config.AppConfig.Socks.DNSTimeout
+		dnsTimeout := config.AppConfig.Socks.DNSTimeout.Duration()
 		if len(config.AppConfig.Socks.DNS) > 0 {
 			// 检查 ip 后有没有端口 如果没有 加上:53
 			ip := config.AppConfig.Socks.DNS[0]

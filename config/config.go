@@ -11,6 +11,41 @@ import (
 	"time"
 )
 
+// Duration 是人类可读的时长类型，在 JSON 中支持字符串（如 "2s"、"5m"）或纳秒数字（向后兼容）。
+type Duration time.Duration
+
+// UnmarshalJSON 支持字符串（time.ParseDuration 格式）或纳秒数字。
+func (d *Duration) UnmarshalJSON(data []byte) error {
+	var v interface{}
+	if err := json.Unmarshal(data, &v); err != nil {
+		return err
+	}
+	switch x := v.(type) {
+	case string:
+		parsed, err := time.ParseDuration(x)
+		if err != nil {
+			return fmt.Errorf("invalid duration %q: %w", x, err)
+		}
+		*d = Duration(parsed)
+		return nil
+	case float64:
+		*d = Duration(int64(x))
+		return nil
+	default:
+		return fmt.Errorf("duration must be string or number, got %T", v)
+	}
+}
+
+// MarshalJSON 输出人类可读的字符串（如 "2s"、"5m0s"）。
+func (d Duration) MarshalJSON() ([]byte, error) {
+	return json.Marshal(time.Duration(d).String())
+}
+
+// Duration 返回标准库 time.Duration，便于在业务代码中使用。
+func (d Duration) Duration() time.Duration {
+	return time.Duration(d)
+}
+
 // Config represents the application configuration structure, containing essential details such as keys, endpoints, and access tokens.
 type Config struct {
 	// 连接信息
@@ -39,19 +74,19 @@ type SocksConfig struct {
 	Password          string        `json:"password"`            // 代理认证的密码
 	ConnectPort       int           `json:"connect_port"`        // MASQUE连接使用的端口
 	DNS               []string      `json:"dns"`                 // 在MASQUE隧道内使用的DNS服务器
-	DNSTimeout        time.Duration `json:"dns_timeout"`         // DNS查询超时时间（超时后尝试下一个服务器）
-	RemoteDNS         bool          `json:"remote_dns"`          // 是否使用远程DNS（通过TUN隧道），false则使用本地DNS
-	UseIPv6           bool          `json:"use_ipv6"`            // 是否使用IPv6进行MASQUE连接
-	NoTunnelIPv4      bool          `json:"no_tunnel_ipv4"`      // 是否在MASQUE隧道内禁用IPv4
-	NoTunnelIPv6      bool          `json:"no_tunnel_ipv6"`      // 是否在MASQUE隧道内禁用IPv6
-	BlockUDP443       bool          `json:"block_udp_443"`       // Whether to block outbound UDP/443 (QUIC)
-	SNIAddress        string        `json:"sni_address"`         // MASQUE连接使用的SNI地址
-	KeepalivePeriod   time.Duration `json:"keepalive_period"`    // MASQUE连接的心跳周期
-	MTU               int           `json:"mtu"`                 // MASQUE连接的MTU
-	InitialPacketSize uint16        `json:"initial_packet_size"` // MASQUE连接的初始包大小
-	ReconnectDelay    time.Duration `json:"reconnect_delay"`     // 重连尝试之间的延迟
-	ConnectionTimeout time.Duration `json:"connection_timeout"`  // 建立连接的超时时间
-	IdleTimeout       time.Duration `json:"idle_timeout"`        // 空闲连接的超时时间
+	DNSTimeout        Duration `json:"dns_timeout"`         // DNS查询超时时间（超时后尝试下一个服务器）
+	RemoteDNS         bool     `json:"remote_dns"`          // 是否使用远程DNS（通过TUN隧道），false则使用本地DNS
+	UseIPv6           bool     `json:"use_ipv6"`            // 是否使用IPv6进行MASQUE连接
+	NoTunnelIPv4      bool     `json:"no_tunnel_ipv4"`      // 是否在MASQUE隧道内禁用IPv4
+	NoTunnelIPv6      bool     `json:"no_tunnel_ipv6"`      // 是否在MASQUE隧道内禁用IPv6
+	BlockUDP443       bool     `json:"block_udp_443"`       // Whether to block outbound UDP/443 (QUIC)
+	SNIAddress        string   `json:"sni_address"`         // MASQUE连接使用的SNI地址
+	KeepalivePeriod   Duration `json:"keepalive_period"`    // MASQUE连接的心跳周期
+	MTU               int      `json:"mtu"`                 // MASQUE连接的MTU
+	InitialPacketSize uint16   `json:"initial_packet_size"` // MASQUE连接的初始包大小
+	ReconnectDelay    Duration `json:"reconnect_delay"`     // 重连尝试之间的延迟
+	ConnectionTimeout Duration `json:"connection_timeout"`  // 建立连接的超时时间
+	IdleTimeout       Duration `json:"idle_timeout"`        // 空闲连接的超时时间
 	SelfCheck         bool          `json:"self_check"`          // 是否启用隧道自检并在连续失败后重连
 }
 
@@ -105,19 +140,19 @@ func GetDefaultSocksConfig() SocksConfig {
 		Password:          "",
 		ConnectPort:       443,
 		DNS:               []string{"1.1.1.1", "8.8.8.8"},
-		DNSTimeout:        2 * time.Second,
+		DNSTimeout:        Duration(2 * time.Second),
 		RemoteDNS:         false,
 		UseIPv6:           false,
 		NoTunnelIPv4:      false,
 		NoTunnelIPv6:      false,
-		BlockUDP443:       false,
+		BlockUDP443:       true,
 		SNIAddress:        "", // 这应当从internal.ConnectSNI读取，但现在我们不修改其他文件
-		KeepalivePeriod:   30 * time.Second,
+		KeepalivePeriod:   Duration(30 * time.Second),
 		MTU:               1280,
 		InitialPacketSize: 1242,
-		ReconnectDelay:    1 * time.Second,
-		ConnectionTimeout: 30 * time.Second,
-		IdleTimeout:       5 * time.Minute,
+		ReconnectDelay:    Duration(1 * time.Second),
+		ConnectionTimeout: Duration(30 * time.Second),
+		IdleTimeout:       Duration(5 * time.Minute),
 		SelfCheck:         false,
 	}
 }
