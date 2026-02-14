@@ -47,6 +47,21 @@ If you already have a configuration file, run directly:
 ./uscf proxy -c config.json
 ```
 
+### Scan Endpoint (Update Config and Exit)
+
+Use `scan` to find a healthy endpoint and write it into `config.json`, then exit:
+
+```bash
+./uscf scan --ipv4 -c config.json
+./uscf scan --ipv6 -c config.json
+```
+
+Optional:
+
+```bash
+./uscf scan --ipv4 --timeout 3s -c config.json
+```
+
 ### WARP+ License Usage
 
 Use the `--license` flag to bind/update your own WARP+ license on Cloudflare account.
@@ -181,6 +196,18 @@ Available flags:
 - `--jwt string`: Team token (optional)
 - `--license string`: WARP+ license key to bind/update account (optional)
 - `--reset-config`: Reset SOCKS5 configuration to default values
+- `-c, --config string`: Configuration file path (default "config.json")
+
+### scan Command
+
+```bash
+./uscf scan [flags]
+```
+
+Available flags:
+- `--ipv4`: Scan IPv4 endpoint candidates and update `endpoint_v4`
+- `--ipv6`: Scan IPv6 endpoint candidates and update `endpoint_v6`
+- `--timeout duration`: Per-endpoint scan timeout (default "3s")
 - `-c, --config string`: Configuration file path (default "config.json")
 
 ## Connection Example
