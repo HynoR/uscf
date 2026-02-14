@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -42,6 +43,7 @@ func init() {
 	proxyCmd.Flags().String("name", "", "Device name for registration")
 	proxyCmd.Flags().Bool("accept-tos", true, "Automatically accept Cloudflare TOS")
 	proxyCmd.Flags().String("jwt", "", "Team token for registration")
+	proxyCmd.Flags().String("license", "", "WARP+ license key to bind to the account")
 
 	// 添加重置SOCKS5配置的标志
 	proxyCmd.Flags().Bool("reset-config", false, "Reset SOCKS5 configuration to default values")
@@ -70,16 +72,20 @@ func runProxyCmd(cmd *cobra.Command, args []string) {
 	if configPath == "" {
 		configPath = "config.json"
 	}
+	customLicense, _ := cmd.Flags().GetString("license")
+	customLicense = strings.TrimSpace(customLicense)
 
 	// 检查是否需要重置SOCKS5配置
 	resetConfig, _ := cmd.Flags().GetBool("reset-config")
+	registeredThisRun := false
 
 	// 1. 如有需要，进行自动注册
 	if !config.ConfigLoaded {
-		if err := handleRegistration(cmd, configPath); err != nil {
+		if err := handleRegistration(cmd, configPath, customLicense); err != nil {
 			cmd.Printf("%v\n", err)
 			return
 		}
+		registeredThisRun = true
 
 		// 更新一些需要从内部常量获取的配置值
 		config.AppConfig.Socks.SNIAddress = internal.ConnectSNI
@@ -108,6 +114,14 @@ func runProxyCmd(cmd *cobra.Command, args []string) {
 			return
 		}
 		log.Printf("SOCKS5 configuration has been reset to default values in %s", configPath)
+	}
+
+	// 对已有配置场景，允许用户主动更新 license。
+	if config.ConfigLoaded && !registeredThisRun && customLicense != "" {
+		if err := applyCustomLicense(configPath, customLicense); err != nil {
+			cmd.Printf("%v\n", err)
+			return
+		}
 	}
 
 	// 检查并应用命令行参数覆盖配置文件的值
@@ -157,7 +171,7 @@ func runProxyCmd(cmd *cobra.Command, args []string) {
 }
 
 // handleRegistration 处理自动注册流程
-func handleRegistration(cmd *cobra.Command, configPath string) error {
+func handleRegistration(cmd *cobra.Command, configPath, customLicense string) error {
 	log.Println("Config not loaded. Starting automatic registration...")
 
 	// 获取注册参数
@@ -173,6 +187,18 @@ func handleRegistration(cmd *cobra.Command, configPath string) error {
 	accountData, err := api.Register(model, locale, jwt, acceptTos)
 	if err != nil {
 		return fmt.Errorf("Failed to register: %v", err)
+	}
+
+	if customLicense != "" {
+		log.Printf("Applying custom WARP+ license...")
+		licensedAccountData, apiErr, err := api.ApplyLicense(accountData, customLicense)
+		if err != nil {
+			if apiErr != nil {
+				return fmt.Errorf("Failed to apply license: %v (API errors: %s)", err, apiErr.ErrorsAsString("; "))
+			}
+			return fmt.Errorf("Failed to apply license: %v", err)
+		}
+		accountData = licensedAccountData
 	}
 
 	// 生成密钥对
@@ -203,7 +229,7 @@ func handleRegistration(cmd *cobra.Command, configPath string) error {
 		// strip [ from beginning and ]:0 from end
 		updatedAccountData.Config.Peers[0].Endpoint.V6[1:len(updatedAccountData.Config.Peers[0].Endpoint.V6)-3],
 		updatedAccountData.Config.Peers[0].PublicKey,
-		updatedAccountData.Account.License,
+		pickAccountLicense(updatedAccountData, accountData, customLicense),
 		updatedAccountData.ID,
 		accountData.Token,
 		updatedAccountData.Config.Interface.Addresses.V4,
@@ -221,6 +247,50 @@ func handleRegistration(cmd *cobra.Command, configPath string) error {
 	// 标记配置已加载
 	config.ConfigLoaded = true
 	return nil
+}
+
+func applyCustomLicense(configPath, customLicense string) error {
+	if config.AppConfig.ID == "" || config.AppConfig.AccessToken == "" {
+		return fmt.Errorf("Failed to apply license: missing id/access_token in config")
+	}
+	if config.AppConfig.License == customLicense {
+		log.Printf("License already set in config, skipping update")
+		return nil
+	}
+
+	accountData := models.AccountData{
+		ID:    config.AppConfig.ID,
+		Token: config.AppConfig.AccessToken,
+		Account: models.Account{
+			License: config.AppConfig.License,
+		},
+	}
+
+	updatedAccountData, apiErr, err := api.ApplyLicense(accountData, customLicense)
+	if err != nil {
+		if apiErr != nil {
+			return fmt.Errorf("Failed to apply license: %v (API errors: %s)", err, apiErr.ErrorsAsString("; "))
+		}
+		return fmt.Errorf("Failed to apply license: %v", err)
+	}
+
+	config.AppConfig.License = pickAccountLicense(updatedAccountData, accountData, customLicense)
+	if err := config.AppConfig.SaveConfig(configPath); err != nil {
+		return fmt.Errorf("Failed to save config after license update: %v", err)
+	}
+	log.Printf("License updated successfully")
+
+	return nil
+}
+
+func pickAccountLicense(primary models.AccountData, fallback models.AccountData, customLicense string) string {
+	if primary.Account.License != "" {
+		return primary.Account.License
+	}
+	if fallback.Account.License != "" {
+		return fallback.Account.License
+	}
+	return customLicense
 }
 
 // setupAndRunSocksProxy 设置并运行SOCKS5代理
@@ -252,15 +322,21 @@ func setupAndRunSocksProxy(cmd *cobra.Command) error {
 	}
 	defer tunDev.Close()
 
+	// 准备SOCKS运行时
+	socksRuntime, err := prepareSocksRuntime(tunNet, connectionTimeout, idleTimeout)
+	if err != nil {
+		return err
+	}
+
 	// 配置连接并启动隧道
-	readyCh := startTunnel(cmd, tlsConfig, endpoint, tunDev, tunNet)
+	readyCh := startTunnel(cmd, tlsConfig, endpoint, tunDev, tunNet, socksRuntime)
 
 	log.Println("Waiting for MASQUE connection before starting SOCKS5 proxy...")
 	<-readyCh
 	log.Println("MASQUE connection established. Starting SOCKS5 proxy listener...")
 
 	// 创建并启动SOCKS服务器
-	return runSocksServer(cmd, tunNet, connectionTimeout, idleTimeout)
+	return runSocksServer(socksRuntime, idleTimeout)
 }
 
 // prepareTlsConfig 准备TLS配置
@@ -372,7 +448,7 @@ func createTunDevice(localAddresses, dnsAddrs []netip.Addr, cmd *cobra.Command) 
 }
 
 // startTunnel 配置并启动隧道连接
-func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint *net.UDPAddr, tunDev tun.Device, tunNet *netstack.Net) <-chan struct{} {
+func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint *net.UDPAddr, tunDev tun.Device, tunNet *netstack.Net, socksRuntime *socksRuntime) <-chan struct{} {
 	readyCh := make(chan struct{})
 	var readyOnce sync.Once
 
@@ -398,9 +474,20 @@ func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint *net.UDPAdd
 			Factor:       2.0,
 		},
 		OnConnected: func() {
+			if socksRuntime != nil {
+				socksRuntime.SetTunnelUp(true)
+			}
 			readyOnce.Do(func() {
 				close(readyCh)
 			})
+		},
+		OnDisconnected: func(err error) {
+			if socksRuntime == nil {
+				return
+			}
+			socksRuntime.SetTunnelUp(false)
+			log.Printf("tunnel_down: %v", err)
+			socksRuntime.RestartAndDrain(err)
 		},
 	}
 
@@ -413,16 +500,8 @@ func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint *net.UDPAdd
 	return readyCh
 }
 
-// runSocksServer 创建并运行SOCKS5服务器
-func runSocksServer(cmd *cobra.Command, tunNet *netstack.Net, connectionTimeout, idleTimeout time.Duration) error {
-	// 从配置中获取网络参数
-	bindAddress := config.AppConfig.Socks.BindAddress
-	port := config.AppConfig.Socks.Port
-
-	if config.AppConfig.Socks.BlockUDP443 {
-		log.Println("UDP/443 blocking is enabled: outbound QUIC/UDP will be rejected")
-	}
-
+// prepareSocksRuntime 创建SOCKS运行时，包括解析器、拨号器和可重建的server工厂
+func prepareSocksRuntime(tunNet *netstack.Net, connectionTimeout, idleTimeout time.Duration) (*socksRuntime, error) {
 	// 根据配置选择DNS解析器
 	var resolver socks5.NameResolver
 	if config.AppConfig.Socks.RemoteDNS {
@@ -434,7 +513,7 @@ func runSocksServer(cmd *cobra.Command, tunNet *netstack.Net, connectionTimeout,
 		for _, dns := range config.AppConfig.Socks.DNS {
 			addr, err := netip.ParseAddr(dns)
 			if err != nil {
-				return fmt.Errorf("Failed to parse DNS server %s: %v", dns, err)
+				return nil, fmt.Errorf("Failed to parse DNS server %s: %v", dns, err)
 			}
 			dnsAddrs = append(dnsAddrs, addr)
 		}
@@ -463,8 +542,12 @@ func runSocksServer(cmd *cobra.Command, tunNet *netstack.Net, connectionTimeout,
 
 	}
 
-	// 添加超时设置的拨号函数
-	dialFunc := func(ctx context.Context, network, addr string) (net.Conn, error) {
+	if config.AppConfig.Socks.BlockUDP443 {
+		log.Println("UDP/443 blocking is enabled: outbound QUIC/UDP will be rejected")
+	}
+
+	// 仅负责实际拨号，不做隧道状态门控；门控由socksRuntime统一处理。
+	upstreamDial := func(ctx context.Context, network, addr string) (net.Conn, error) {
 		if config.AppConfig.Socks.BlockUDP443 && strings.HasPrefix(network, "udp") {
 			_, port, err := net.SplitHostPort(addr)
 			if err == nil && port == "443" {
@@ -490,12 +573,23 @@ func runSocksServer(cmd *cobra.Command, tunNet *netstack.Net, connectionTimeout,
 	username := config.AppConfig.Socks.Username
 	password := config.AppConfig.Socks.Password
 
-	// 创建SOCKS5服务器
-	server := createSocksServer(username, password, dialFunc, resolver)
+	return newSocksRuntime(
+		upstreamDial,
+		func(dialFunc func(ctx context.Context, network, addr string) (net.Conn, error)) *socks5.Server {
+			return createSocksServer(username, password, dialFunc, resolver)
+		},
+	), nil
+}
+
+// runSocksServer 创建并运行SOCKS5服务器
+func runSocksServer(socksRuntime *socksRuntime, idleTimeout time.Duration) error {
+	// 从配置中获取网络参数
+	bindAddress := config.AppConfig.Socks.BindAddress
+	port := config.AppConfig.Socks.Port
 
 	// 启动监听
 	log.Printf("SOCKS proxy listening on %s:%s with timeouts (connect: %s, idle: %s)",
-		bindAddress, port, connectionTimeout, idleTimeout)
+		bindAddress, port, config.AppConfig.Socks.ConnectionTimeout.Duration(), idleTimeout)
 
 	listener, err := net.Listen("tcp", net.JoinHostPort(bindAddress, port))
 	if err != nil {
@@ -509,12 +603,28 @@ func runSocksServer(cmd *cobra.Command, tunNet *netstack.Net, connectionTimeout,
 			continue
 		}
 
+		if socksRuntime.DropIfDisconnected(conn) {
+			continue
+		}
+
 		timeoutConn := &models.TimeoutConn{
 			Conn:        conn,
 			IdleTimeout: idleTimeout,
 		}
+		trackedConn := socksRuntime.TrackConn(timeoutConn)
+		server := socksRuntime.CurrentServer()
+		if server == nil {
+			log.Println("Failed to serve SOCKS connection: server unavailable")
+			_ = trackedConn.Close()
+			continue
+		}
 
-		go server.ServeConn(timeoutConn)
+		go func(server *socks5.Server, conn net.Conn) {
+			if err := server.ServeConn(conn); err != nil && !errors.Is(err, net.ErrClosed) {
+				log.Printf("Failed to serve SOCKS connection: %v", err)
+			}
+			_ = conn.Close()
+		}(server, trackedConn)
 	}
 }
 

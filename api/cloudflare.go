@@ -174,3 +174,74 @@ func EnrollKey(accountData models.AccountData, pubKey []byte, deviceName string)
 
 	return accountData, nil, nil
 }
+
+// ApplyLicense updates the Cloudflare account with a user-provided WARP+ license.
+//
+// Parameters:
+//   - accountData: models.AccountData - Must contain ID and Token.
+//   - license: string - WARP+ license key.
+//
+// Returns:
+//   - models.AccountData: Updated account data from API.
+//   - *models.APIError: Parsed API error when status code is non-2xx.
+//   - error: Transport/parsing error.
+func ApplyLicense(accountData models.AccountData, license string) (models.AccountData, *models.APIError, error) {
+	payload := struct {
+		License string `json:"license"`
+	}{
+		License: license,
+	}
+
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return models.AccountData{}, nil, fmt.Errorf("failed to marshal json: %v", err)
+	}
+
+	req, err := http.NewRequest(
+		"PATCH",
+		internal.ApiUrl+"/"+internal.ApiVersion+"/reg/"+accountData.ID+"/account",
+		bytes.NewBuffer(jsonData),
+	)
+	if err != nil {
+		return models.AccountData{}, nil, fmt.Errorf("failed to create request: %v", err)
+	}
+
+	for k, v := range internal.Headers {
+		req.Header.Set(k, v)
+	}
+	req.Header.Set("Authorization", "Bearer "+accountData.Token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return models.AccountData{}, nil, fmt.Errorf("failed to send request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return models.AccountData{}, nil, fmt.Errorf("failed to read response body: %v", err)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var apiErr models.APIError
+		if err := json.Unmarshal(body, &apiErr); err != nil {
+			return models.AccountData{}, nil, fmt.Errorf("failed to parse error response: %v", err)
+		}
+		return models.AccountData{}, &apiErr, fmt.Errorf("failed to apply license: %s", resp.Status)
+	}
+
+	var updatedAccount models.AccountData
+	if err := json.Unmarshal(body, &updatedAccount); err != nil {
+		return models.AccountData{}, nil, fmt.Errorf("failed to decode response: %v", err)
+	}
+
+	// Token is usually only returned by /reg.
+	if updatedAccount.Token == "" {
+		updatedAccount.Token = accountData.Token
+	}
+	if updatedAccount.ID == "" {
+		updatedAccount.ID = accountData.ID
+	}
+
+	return updatedAccount, nil, nil
+}

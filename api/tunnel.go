@@ -31,6 +31,12 @@ const (
 
 var packetBufferPool *NetBuffer
 
+var (
+	connectTunnelFunc  = ConnectTunnel
+	handleForwardingFn = handleForwarding
+	runSelfCheckLoopFn = runSelfCheckLoop
+)
+
 // NetBuffer is a pool of byte slices with a fixed capacity.
 // Helps to reduce memory allocations and improve performance.
 // It uses a sync.Pool to manage the byte slices.
@@ -201,7 +207,8 @@ type ConnectionConfig struct {
 	SelfCheckEnabled  bool
 	SelfCheckDialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
 	ReconnectStrategy BackoffStrategy
-	OnConnected       func() // Optional callback after MASQUE connection is established.
+	OnConnected       func()          // Optional callback after MASQUE connection is established.
+	OnDisconnected    func(err error) // Optional callback after an established MASQUE connection is lost.
 }
 
 // BackoffStrategy 定义重连策略接口
@@ -416,11 +423,18 @@ func monitorStats(ctx context.Context, stats *TunnelStats) {
 }
 
 // handleConnection 处理单次连接
-func handleConnection(ctx context.Context, config ConnectionConfig, device TunnelDevice, stats *TunnelStats, reconnectAttempt int) (int, error) {
+func handleConnection(ctx context.Context, config ConnectionConfig, device TunnelDevice, stats *TunnelStats, reconnectAttempt int) (nextAttempt int, err error) {
+	connected := false
+	defer func() {
+		if connected && config.OnDisconnected != nil {
+			config.OnDisconnected(err)
+		}
+	}()
+
 	log.Printf("Establishing MASQUE connection to %s:%d (attempt #%d)",
 		config.Endpoint.IP, config.Endpoint.Port, reconnectAttempt+1)
 
-	udpConn, tr, ipConn, rsp, err := ConnectTunnel(
+	udpConn, tr, ipConn, rsp, err := connectTunnelFunc(
 		ctx,
 		config.TLSConfig,
 		internal.DefaultQuicConfig(config.KeepAlivePeriod, config.InitialPacketSize),
@@ -450,6 +464,7 @@ func handleConnection(ctx context.Context, config ConnectionConfig, device Tunne
 
 	stats.RecordHandShake()
 	log.Println("Connected to MASQUE server")
+	connected = true
 	if config.OnConnected != nil {
 		config.OnConnected()
 	}
@@ -462,7 +477,7 @@ func handleConnection(ctx context.Context, config ConnectionConfig, device Tunne
 
 	forwardingErrCh := make(chan error, 1)
 	go func() {
-		forwardingErrCh <- handleForwarding(forwardingCtx, device, ipConn, stats)
+		forwardingErrCh <- handleForwardingFn(forwardingCtx, device, ipConn, stats)
 	}()
 
 	var selfCheckErrCh <-chan error
@@ -470,7 +485,7 @@ func handleConnection(ctx context.Context, config ConnectionConfig, device Tunne
 		ch := make(chan error, 1)
 		selfCheckErrCh = ch
 		go func() {
-			ch <- runSelfCheckLoop(forwardingCtx, config.SelfCheckDialFunc)
+			ch <- runSelfCheckLoopFn(forwardingCtx, config.SelfCheckDialFunc)
 		}()
 	}
 

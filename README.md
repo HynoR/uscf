@@ -36,7 +36,7 @@ Before you use this tool, you must accept and follow [Cloudflare TOS](https://ww
 The first time you run USCF, it will automatically register a Cloudflare Warp account and create a configuration file:
 
 ```bash
-./uscf proxy -b <bind-addr;default:127.0.0.1> -u <username;default:none> -w <password;default:none> -p <port;default:1080> -c <config.json>
+./uscf proxy -b <bind-addr;default:127.0.0.1> -u <username;default:none> -w <password;default:none> -p <port;default:1080> -c <config.json> --license <WARP+ license;optional>
 ```
 
 ### Use Existing Configuration
@@ -46,6 +46,29 @@ If you already have a configuration file, run directly:
 ```bash
 ./uscf proxy -c config.json
 ```
+
+### WARP+ License Usage
+
+Use the `--license` flag to bind/update your own WARP+ license on Cloudflare account:
+
+1. First registration (no `config.json` / config not loaded):
+```bash
+./uscf proxy -c config.json --license <YOUR_WARP_PLUS_LICENSE>
+```
+This triggers automatic registration, then applies the license, then saves the final `license` to `config.json`.
+
+2. Later update (config already exists):
+```bash
+./uscf proxy -c config.json --license <NEW_OR_EXISTING_LICENSE>
+```
+This triggers a license update request before starting proxy, and writes the returned license back to `config.json`.
+
+3. Trigger behavior:
+- `--license` provided: tries to sync license to Cloudflare account.
+- `--license` not provided: no license update request is sent.
+- If the provided value is the same as current `config.json` `license`, update is skipped.
+
+Note: editing `config.json` `license` alone does not send update to Cloudflare. Use `--license` to trigger remote update.
 
 
 ## Docker Deployment
@@ -139,6 +162,7 @@ Available flags:
 - `--name string`: Device name used during registration
 - `--accept-tos`: Automatically accept Cloudflare Terms of Service (default true)
 - `--jwt string`: Team token (optional)
+- `--license string`: WARP+ license key to bind/update account (optional)
 - `--reset-config`: Reset SOCKS5 configuration to default values
 - `-c, --config string`: Configuration file path (default "config.json")
 
