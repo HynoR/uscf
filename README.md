@@ -49,26 +49,35 @@ If you already have a configuration file, run directly:
 
 ### WARP+ License Usage
 
-Use the `--license` flag to bind/update your own WARP+ license on Cloudflare account:
+Use the `--license` flag to bind/update your own WARP+ license on Cloudflare account.
+USCF now follows wgcf-style remote-state flow:
 
-1. First registration (no `config.json` / config not loaded):
+1. `GET /reg/{deviceId}/account` to read current remote license
+2. If different, `PUT /reg/{deviceId}/account` with `{"license":"..."}`
+3. `GET /reg/{deviceId}/account` again and persist final remote license to `config.json`
+
+#### First registration (no `config.json` / config not loaded)
 ```bash
 ./uscf proxy -c config.json --license <YOUR_WARP_PLUS_LICENSE>
 ```
-This triggers automatic registration, then applies the license, then saves the final `license` to `config.json`.
+This runs registration and then performs the remote license rebind flow above. If binding fails, command exits with error.
 
-2. Later update (config already exists):
+#### Later update (config already exists)
 ```bash
 ./uscf proxy -c config.json --license <NEW_OR_EXISTING_LICENSE>
 ```
-This triggers a license update request before starting proxy, and writes the returned license back to `config.json`.
+This performs the same remote-state-driven flow before proxy startup, then writes final remote license back to `config.json`.
 
-3. Trigger behavior:
+#### Trigger behavior
 - `--license` provided: tries to sync license to Cloudflare account.
 - `--license` not provided: no license update request is sent.
-- If the provided value is the same as current `config.json` `license`, update is skipped.
+- If remote license already equals target, no `PUT` update is sent.
 
 Note: editing `config.json` `license` alone does not send update to Cloudflare. Use `--license` to trigger remote update.
+
+#### Important notes
+- License bind success does not always mean immediate `warp=plus` behavior; Cloudflare side may still present `warp=on` for affected accounts.
+- If you hit that behavior, create a fresh account and bind license immediately (same recommendation as wgcf docs).
 
 
 ## Docker Deployment
@@ -96,6 +105,10 @@ After Automatic Registration, You would get a config.json like the example below
 The Config file is merge from usque's flags and configs, You can find the description of config items from usque.
 
 Time options (`dns_timeout`, `keepalive_period`, `reconnect_delay`, `connection_timeout`, `idle_timeout`) use human-readable strings: unit suffixes are `ns`, `us`/`µs`, `ms`, `s`, `m`, `h` (e.g. `"2s"`, `"5m"`, `"1h30m"`). Legacy configs with numeric nanosecond values are still accepted.
+
+Logging options are configured in `logging`:
+- `level`: `debug`, `info`, `warn`, `error` (default: `info`)
+- `format`: `text`, `json` (default: `text`)
 
 ```json
 {
@@ -131,6 +144,10 @@ Time options (`dns_timeout`, `keepalive_period`, `reconnect_delay`, `connection_
     "connection_timeout": "30s",
     "idle_timeout": "5m",
     "self_check": false
+  },
+  "logging": {
+    "level": "info",
+    "format": "text"
   },
   "registration": {
     "device_name": "Device name"

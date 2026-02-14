@@ -1,15 +1,19 @@
 package main
 
 import (
-	"fmt"
+	"log/slog"
 	"os"
 
 	"github.com/HynoR/uscf/cmd"
+	"github.com/HynoR/uscf/config"
+	"github.com/HynoR/uscf/internal/logging"
 )
 
 func main() {
+	logging.Setup(config.GetDefaultLoggingConfig())
+
 	if err := cmd.Execute(); err != nil {
-		fmt.Println("Error:", err)
+		slog.Error("command failed", "error", err)
 		os.Exit(1)
 	}
 }

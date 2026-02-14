@@ -7,11 +7,28 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/HynoR/uscf/internal"
 	"github.com/HynoR/uscf/models"
 )
+
+var (
+	cloudflareAPIBaseURL = internal.ApiUrl
+	cloudflareHTTPClient = http.DefaultClient
+)
+
+func parseAPIError(body []byte) *models.APIError {
+	var apiErr models.APIError
+	if err := json.Unmarshal(body, &apiErr); err != nil {
+		return nil
+	}
+	if len(apiErr.Errors) == 0 && len(apiErr.Messages) == 0 && apiErr.Result == nil {
+		return nil
+	}
+	return &apiErr
+}
 
 // Register creates a new user account by registering a WireGuard public key and generating a random Android-like device identifier.
 // The WireGuard private key isn't stored anywhere, therefore it won't be usable. It's sole purpose is to mimic the Android app's registration process.
@@ -73,7 +90,7 @@ func Register(model, locale, jwt string, acceptTos bool) (models.AccountData, er
 		return models.AccountData{}, fmt.Errorf("failed to marshal json: %v", err)
 	}
 
-	req, err := http.NewRequest("POST", internal.ApiUrl+"/"+internal.ApiVersion+"/reg", bytes.NewBuffer(jsonData))
+	req, err := http.NewRequest("POST", cloudflareAPIBaseURL+"/"+internal.ApiVersion+"/reg", bytes.NewBuffer(jsonData))
 	if err != nil {
 		return models.AccountData{}, fmt.Errorf("failed to create request: %v", err)
 	}
@@ -86,7 +103,7 @@ func Register(model, locale, jwt string, acceptTos bool) (models.AccountData, er
 		req.Header.Set("CF-Access-Jwt-Assertion", jwt)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := cloudflareHTTPClient.Do(req)
 	if err != nil {
 		return models.AccountData{}, fmt.Errorf("failed to send request: %v", err)
 	}
@@ -139,7 +156,7 @@ func EnrollKey(accountData models.AccountData, pubKey []byte, deviceName string)
 		return models.AccountData{}, nil, fmt.Errorf("failed to marshal json: %v", err)
 	}
 
-	req, err := http.NewRequest("PATCH", internal.ApiUrl+"/"+internal.ApiVersion+"/reg/"+accountData.ID, bytes.NewBuffer(jsonData))
+	req, err := http.NewRequest("PATCH", cloudflareAPIBaseURL+"/"+internal.ApiVersion+"/reg/"+accountData.ID, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return models.AccountData{}, nil, fmt.Errorf("failed to create request: %v", err)
 	}
@@ -149,7 +166,7 @@ func EnrollKey(accountData models.AccountData, pubKey []byte, deviceName string)
 	}
 	req.Header.Set("Authorization", "Bearer "+accountData.Token)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := cloudflareHTTPClient.Do(req)
 	if err != nil {
 		return models.AccountData{}, nil, fmt.Errorf("failed to send request: %v", err)
 	}
@@ -161,11 +178,11 @@ func EnrollKey(accountData models.AccountData, pubKey []byte, deviceName string)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		var apiErr models.APIError
-		if err := json.Unmarshal(body, &apiErr); err != nil {
-			return models.AccountData{}, nil, fmt.Errorf("failed to parse error response: %v", err)
+		apiErr := parseAPIError(body)
+		if apiErr != nil {
+			return models.AccountData{}, apiErr, fmt.Errorf("failed to update: %s", resp.Status)
 		}
-		return models.AccountData{}, &apiErr, fmt.Errorf("failed to update: %s", resp.Status)
+		return models.AccountData{}, nil, fmt.Errorf("failed to update: %s", resp.Status)
 	}
 
 	if err := json.Unmarshal(body, &accountData); err != nil {
@@ -173,6 +190,126 @@ func EnrollKey(accountData models.AccountData, pubKey []byte, deviceName string)
 	}
 
 	return accountData, nil, nil
+}
+
+// GetAccount fetches account information for the current source device.
+func GetAccount(accountData models.AccountData) (models.Account, *models.APIError, error) {
+	req, err := http.NewRequest(
+		"GET",
+		cloudflareAPIBaseURL+"/"+internal.ApiVersion+"/reg/"+accountData.ID+"/account",
+		nil,
+	)
+	if err != nil {
+		return models.Account{}, nil, fmt.Errorf("failed to create request: %v", err)
+	}
+
+	for k, v := range internal.Headers {
+		req.Header.Set(k, v)
+	}
+	req.Header.Set("Authorization", "Bearer "+accountData.Token)
+
+	resp, err := cloudflareHTTPClient.Do(req)
+	if err != nil {
+		return models.Account{}, nil, fmt.Errorf("failed to send request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return models.Account{}, nil, fmt.Errorf("failed to read response body: %v", err)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		apiErr := parseAPIError(body)
+		if apiErr != nil {
+			return models.Account{}, apiErr, fmt.Errorf("failed to fetch account: %s", resp.Status)
+		}
+		return models.Account{}, nil, fmt.Errorf("failed to fetch account: %s", resp.Status)
+	}
+
+	var account models.Account
+	if err := json.Unmarshal(body, &account); err != nil {
+		return models.Account{}, nil, fmt.Errorf("failed to decode response: %v", err)
+	}
+
+	return account, nil, nil
+}
+
+func updateAccountLicensePut(accountData models.AccountData, license string) (*models.APIError, error) {
+	payload := struct {
+		License string `json:"license"`
+	}{
+		License: license,
+	}
+
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal json: %v", err)
+	}
+
+	req, err := http.NewRequest(
+		"PUT",
+		cloudflareAPIBaseURL+"/"+internal.ApiVersion+"/reg/"+accountData.ID+"/account",
+		bytes.NewBuffer(jsonData),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %v", err)
+	}
+
+	for k, v := range internal.Headers {
+		req.Header.Set(k, v)
+	}
+	req.Header.Set("Authorization", "Bearer "+accountData.Token)
+
+	resp, err := cloudflareHTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %v", err)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		apiErr := parseAPIError(body)
+		if apiErr != nil {
+			return apiErr, fmt.Errorf("failed to apply license: %s", resp.Status)
+		}
+		return nil, fmt.Errorf("failed to apply license: %s", resp.Status)
+	}
+
+	return nil, nil
+}
+
+// RebindLicense updates account license with wgcf-compatible flow:
+// GetAccount -> optional PUT UpdateAccount -> GetAccount.
+func RebindLicense(accountData models.AccountData, target string) (models.Account, bool, *models.APIError, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return models.Account{}, false, nil, fmt.Errorf("target license is empty")
+	}
+
+	current, apiErr, err := GetAccount(accountData)
+	if err != nil {
+		return models.Account{}, false, apiErr, err
+	}
+	if current.License == target {
+		return current, false, nil, nil
+	}
+
+	apiErr, err = updateAccountLicensePut(accountData, target)
+	if err != nil {
+		return models.Account{}, false, apiErr, err
+	}
+
+	finalAccount, apiErr, err := GetAccount(accountData)
+	if err != nil {
+		return models.Account{}, false, apiErr, err
+	}
+
+	return finalAccount, true, nil, nil
 }
 
 // ApplyLicense updates the Cloudflare account with a user-provided WARP+ license.
@@ -186,62 +323,11 @@ func EnrollKey(accountData models.AccountData, pubKey []byte, deviceName string)
 //   - *models.APIError: Parsed API error when status code is non-2xx.
 //   - error: Transport/parsing error.
 func ApplyLicense(accountData models.AccountData, license string) (models.AccountData, *models.APIError, error) {
-	payload := struct {
-		License string `json:"license"`
-	}{
-		License: license,
-	}
-
-	jsonData, err := json.Marshal(payload)
+	account, _, apiErr, err := RebindLicense(accountData, license)
 	if err != nil {
-		return models.AccountData{}, nil, fmt.Errorf("failed to marshal json: %v", err)
+		return models.AccountData{}, apiErr, err
 	}
 
-	req, err := http.NewRequest(
-		"PATCH",
-		internal.ApiUrl+"/"+internal.ApiVersion+"/reg/"+accountData.ID+"/account",
-		bytes.NewBuffer(jsonData),
-	)
-	if err != nil {
-		return models.AccountData{}, nil, fmt.Errorf("failed to create request: %v", err)
-	}
-
-	for k, v := range internal.Headers {
-		req.Header.Set(k, v)
-	}
-	req.Header.Set("Authorization", "Bearer "+accountData.Token)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return models.AccountData{}, nil, fmt.Errorf("failed to send request: %v", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return models.AccountData{}, nil, fmt.Errorf("failed to read response body: %v", err)
-	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		var apiErr models.APIError
-		if err := json.Unmarshal(body, &apiErr); err != nil {
-			return models.AccountData{}, nil, fmt.Errorf("failed to parse error response: %v", err)
-		}
-		return models.AccountData{}, &apiErr, fmt.Errorf("failed to apply license: %s", resp.Status)
-	}
-
-	var updatedAccount models.AccountData
-	if err := json.Unmarshal(body, &updatedAccount); err != nil {
-		return models.AccountData{}, nil, fmt.Errorf("failed to decode response: %v", err)
-	}
-
-	// Token is usually only returned by /reg.
-	if updatedAccount.Token == "" {
-		updatedAccount.Token = accountData.Token
-	}
-	if updatedAccount.ID == "" {
-		updatedAccount.ID = accountData.ID
-	}
-
-	return updatedAccount, nil, nil
+	accountData.Account = account
+	return accountData, nil, nil
 }

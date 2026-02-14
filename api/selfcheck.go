@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -78,18 +78,24 @@ func runSelfCheckLoop(ctx context.Context, dialFunc func(ctx context.Context, ne
 
 			reconnect, reason := state.Observe(statusCode, err)
 			if err != nil {
-				log.Printf(
-					"Self-check failed: err=%v, status=%d, fail_streak=%d, timeout_streak=%d",
-					err, statusCode, state.failStreak, state.timeoutStreak,
+				slog.Debug(
+					"self-check failed",
+					"error", err,
+					"status", statusCode,
+					"fail_streak", state.failStreak,
+					"timeout_streak", state.timeoutStreak,
 				)
 			} else if statusCode != http.StatusNoContent {
-				log.Printf(
-					"Self-check failed: status=%d, fail_streak=%d, timeout_streak=%d",
-					statusCode, state.failStreak, state.timeoutStreak,
+				slog.Debug(
+					"self-check failed",
+					"status", statusCode,
+					"fail_streak", state.failStreak,
+					"timeout_streak", state.timeoutStreak,
 				)
 			}
 
 			if reconnect {
+				slog.Warn("self-check threshold reached, reconnect required", "reason", reason)
 				return fmt.Errorf("self-check %s", reason)
 			}
 		}

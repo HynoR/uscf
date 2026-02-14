@@ -3,7 +3,7 @@ package cmd
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -76,7 +76,7 @@ func (r *socksRuntime) DropIfDisconnected(conn net.Conn) bool {
 	if addr := conn.RemoteAddr(); addr != nil {
 		remote = addr.String()
 	}
-	log.Printf("new_conn_dropped_while_disconnected: remote=%s", remote)
+	slog.Debug("new connection dropped while tunnel disconnected", "remote", remote)
 	_ = conn.Close()
 	return true
 }
@@ -96,11 +96,11 @@ func (r *socksRuntime) RestartAndDrain(reason error) {
 	r.restartMu.Lock()
 	defer r.restartMu.Unlock()
 
-	log.Printf("socks_restart: reason=%v", reason)
+	slog.Warn("restarting SOCKS runtime after tunnel down", "reason", reason)
 	r.server.Store(r.serverFactory(r.DialContext))
 
 	drained := r.drainActiveConnections()
-	log.Printf("active_conn_drained: count=%d reason=%v", drained, reason)
+	slog.Info("active SOCKS connections drained", "count", drained, "reason", reason)
 }
 
 func (r *socksRuntime) drainActiveConnections() int {

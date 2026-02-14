@@ -5,7 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"math/rand"
 	"net"
 	"sync"
@@ -312,7 +312,7 @@ func handleForwarding(ctx context.Context, device TunnelDevice, ipConn *connecti
 						return
 					}
 					if errStreak == 1 {
-						log.Printf("Error writing to IP connection: %v (streak %d)", err, errStreak)
+						slog.Debug("error writing to IP connection", "error", err, "streak", errStreak)
 					}
 					if !sleepWithBackoff(ctx, &backoff) {
 						return
@@ -332,7 +332,7 @@ func handleForwarding(ctx context.Context, device TunnelDevice, ipConn *connecti
 							errChan <- fmt.Errorf("failed to write ICMP to TUN device: %v", err)
 							return
 						}
-						log.Printf("Error writing to IP connection: %v, continuing...", err)
+						slog.Debug("error writing ICMP to TUN device; continuing", "error", err)
 						continue
 					}
 					stats.RecordPacketIn(len(icmp))
@@ -366,7 +366,7 @@ func handleForwarding(ctx context.Context, device TunnelDevice, ipConn *connecti
 						return
 					}
 					if errStreak == 1 {
-						log.Printf("Error reading from IP connection: %v (streak %d)", err, errStreak)
+						slog.Debug("error reading from IP connection", "error", err, "streak", errStreak)
 					}
 					if !sleepWithBackoff(ctx, &backoff) {
 						return
@@ -416,8 +416,21 @@ func monitorStats(ctx context.Context, stats *TunnelStats) {
 			errors := atomic.LoadUint64(&stats.Errors)
 			handShake := atomic.LoadUint64(&stats.HandShake)
 
-			log.Printf("Tunnel stats: In: %d pkts (%d bytes), Out: %d pkts (%d bytes), Errors: %d, HandShake: %d",
-				packetsIn, bytesIn, packetsOut, bytesOut, errors, handShake)
+			slog.Debug(
+				"tunnel stats",
+				"packets_in",
+				packetsIn,
+				"bytes_in",
+				bytesIn,
+				"packets_out",
+				packetsOut,
+				"bytes_out",
+				bytesOut,
+				"errors",
+				errors,
+				"handshake",
+				handShake,
+			)
 		}
 	}
 }
@@ -431,8 +444,13 @@ func handleConnection(ctx context.Context, config ConnectionConfig, device Tunne
 		}
 	}()
 
-	log.Printf("Establishing MASQUE connection to %s:%d (attempt #%d)",
-		config.Endpoint.IP, config.Endpoint.Port, reconnectAttempt+1)
+	slog.Info(
+		"establishing MASQUE connection",
+		"endpoint",
+		fmt.Sprintf("%s:%d", config.Endpoint.IP, config.Endpoint.Port),
+		"attempt",
+		reconnectAttempt+1,
+	)
 
 	udpConn, tr, ipConn, rsp, err := connectTunnelFunc(
 		ctx,
@@ -463,7 +481,7 @@ func handleConnection(ctx context.Context, config ConnectionConfig, device Tunne
 	}
 
 	stats.RecordHandShake()
-	log.Println("Connected to MASQUE server")
+	slog.Info("connected to MASQUE server")
 	connected = true
 	if config.OnConnected != nil {
 		config.OnConnected()
@@ -492,13 +510,13 @@ func handleConnection(ctx context.Context, config ConnectionConfig, device Tunne
 	select {
 	case err = <-forwardingErrCh:
 		if err != nil && !errors.Is(err, context.Canceled) {
-			log.Printf("Forwarding error: %v", err)
+			slog.Warn("forwarding error", "error", err)
 			stats.RecordError()
 		}
 		return 0, err
 	case err = <-selfCheckErrCh:
 		if err != nil && !errors.Is(err, context.Canceled) {
-			log.Printf("Self-check triggered reconnect: %v", err)
+			slog.Warn("self-check triggered reconnect", "error", err)
 			stats.RecordError()
 		}
 		cancel()
@@ -516,7 +534,7 @@ func MaintainTunnel(ctx context.Context, config ConnectionConfig, device TunnelD
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("Context canceled, stopping tunnel maintenance")
+			slog.Info("context canceled, stopping tunnel maintenance")
 			return
 		default:
 		}
@@ -528,7 +546,7 @@ func MaintainTunnel(ctx context.Context, config ConnectionConfig, device TunnelD
 
 		if err != nil {
 			delay := config.ReconnectStrategy.NextDelay(reconnectAttempt)
-			log.Printf("Connection error: %v. Will retry in %v", err, delay)
+			slog.Warn("connection error, retrying", "error", err, "delay", delay)
 
 			select {
 			case <-time.After(delay):

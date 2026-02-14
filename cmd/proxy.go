@@ -6,10 +6,9 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/netip"
-	"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -32,8 +31,14 @@ var proxyCmd = &cobra.Command{
 	Use:   "proxy",
 	Short: "One-command solution to run SOCKS5 proxy with auto-registration",
 	Long:  "Automatically registers if no config exists, then runs a dual-stack SOCKS5 proxy with optional authentication.",
-	Run:   runProxyCmd,
+	RunE:  runProxyCmd,
 }
+
+var (
+	registerAccountFunc = api.Register
+	enrollKeyFunc       = api.EnrollKey
+	rebindLicenseFunc   = api.RebindLicense
+)
 
 func init() {
 	// 初始化 proxy 命令的参数
@@ -63,12 +68,11 @@ func init() {
 }
 
 // runProxyCmd 是 proxyCmd 的执行逻辑
-func runProxyCmd(cmd *cobra.Command, args []string) {
+func runProxyCmd(cmd *cobra.Command, args []string) error {
 	// 0. 获取配置文件路径
 	configPath, err := cmd.Flags().GetString("config")
 	if err != nil {
-		cmd.Printf("Failed to get config path: %v\n", err)
-		return
+		return fmt.Errorf("failed to get config path: %w", err)
 	}
 	if configPath == "" {
 		configPath = "config.json"
@@ -83,8 +87,7 @@ func runProxyCmd(cmd *cobra.Command, args []string) {
 	// 1. 如有需要，进行自动注册
 	if !config.ConfigLoaded {
 		if err := handleRegistration(cmd, configPath, customLicense); err != nil {
-			cmd.Printf("%v\n", err)
-			return
+			return err
 		}
 		registeredThisRun = true
 
@@ -93,11 +96,11 @@ func runProxyCmd(cmd *cobra.Command, args []string) {
 
 		// 保存更新后的配置
 		if err := config.AppConfig.SaveConfig(configPath); err != nil {
-			log.Printf("Warning: Failed to save updated config: %v", err)
+			slog.Warn("failed to save updated config", "path", configPath, "error", err)
 		}
 	} else if resetConfig {
 		// 如果已加载配置且指定了reset-config标志，则重置SOCKS5配置
-		log.Println("Resetting SOCKS5 configuration to default values...")
+		slog.Info("resetting SOCKS5 configuration to defaults")
 
 		// 保存当前的SNI地址，因为它取决于内部常量
 		sniAddress := config.AppConfig.Socks.SNIAddress
@@ -110,18 +113,16 @@ func runProxyCmd(cmd *cobra.Command, args []string) {
 
 		// 保存更新后的配置
 		if err := config.AppConfig.SaveConfig(configPath); err != nil {
-			log.Printf("Warning: Failed to save reset config: %v", err)
-			cmd.Printf("Failed to save reset configuration: %v\n", err)
-			return
+			slog.Warn("failed to save reset config", "path", configPath, "error", err)
+			return fmt.Errorf("failed to save reset configuration: %w", err)
 		}
-		log.Printf("SOCKS5 configuration has been reset to default values in %s", configPath)
+		slog.Info("SOCKS5 configuration reset to defaults", "path", configPath)
 	}
 
 	// 对已有配置场景，允许用户主动更新 license。
 	if config.ConfigLoaded && !registeredThisRun && customLicense != "" {
 		if err := applyCustomLicense(configPath, customLicense); err != nil {
-			cmd.Printf("%v\n", err)
-			return
+			return err
 		}
 	}
 
@@ -130,50 +131,51 @@ func runProxyCmd(cmd *cobra.Command, args []string) {
 
 	// 检查绑定地址
 	if bindAddress, _ := cmd.Flags().GetString("bind-address"); bindAddress != "" {
-		log.Printf("Overriding bind address from command line: %s", bindAddress)
+		slog.Info("overriding bind address from command line", "bind_address", bindAddress)
 		config.AppConfig.Socks.BindAddress = bindAddress
 		configChanged = true
 	}
 
 	// 检查端口
 	if port, _ := cmd.Flags().GetString("port"); port != "" {
-		log.Printf("Overriding port from command line: %s", port)
+		slog.Info("overriding port from command line", "port", port)
 		config.AppConfig.Socks.Port = port
 		configChanged = true
 	}
 
 	// 检查用户名
 	if username, _ := cmd.Flags().GetString("username"); username != "" {
-		log.Printf("Overriding username from command line")
+		slog.Info("overriding username from command line")
 		config.AppConfig.Socks.Username = username
 		configChanged = true
 	}
 
 	// 检查密码
 	if password, _ := cmd.Flags().GetString("password"); password != "" {
-		log.Printf("Overriding password from command line")
+		slog.Info("overriding password from command line")
 		config.AppConfig.Socks.Password = password
 		configChanged = true
 	}
 
 	// 如果配置有变更，保存到配置文件
 	if configChanged {
-		log.Printf("Saving updated configuration to %s", configPath)
+		slog.Info("saving updated configuration", "path", configPath)
 		if err := config.AppConfig.SaveConfig(configPath); err != nil {
-			log.Printf("Warning: Failed to save updated config: %v", err)
+			slog.Warn("failed to save updated config", "path", configPath, "error", err)
 		}
 	}
 
 	// 2. 启动 SOCKS5 代理
 	if err := setupAndRunSocksProxy(cmd); err != nil {
-		cmd.Printf("%v\n", err)
-		return
+		return err
 	}
+
+	return nil
 }
 
 // handleRegistration 处理自动注册流程
 func handleRegistration(cmd *cobra.Command, configPath, customLicense string) error {
-	log.Println("Config not loaded. Starting automatic registration...")
+	slog.Info("config not loaded, starting automatic registration")
 
 	// 获取注册参数
 	deviceName, _ := cmd.Flags().GetString("name")
@@ -182,24 +184,30 @@ func handleRegistration(cmd *cobra.Command, configPath, customLicense string) er
 	acceptTos, _ := cmd.Flags().GetBool("accept-tos")
 	jwt, _ := cmd.Flags().GetString("jwt")
 
-	log.Printf("Registering with locale %s and model %s", locale, model)
+	slog.Info("registering account", "locale", locale, "model", model)
 
 	// 注册账户
-	accountData, err := api.Register(model, locale, jwt, acceptTos)
+	accountData, err := registerAccountFunc(model, locale, jwt, acceptTos)
 	if err != nil {
 		return fmt.Errorf("Failed to register: %v", err)
 	}
 
 	if customLicense != "" {
-		log.Printf("Applying custom WARP+ license...")
-		licensedAccountData, apiErr, err := api.ApplyLicense(accountData, customLicense)
+		slog.Info("fetching remote account license")
+		finalAccount, changed, apiErr, err := rebindLicenseFunc(accountData, customLicense)
 		if err != nil {
 			if apiErr != nil {
 				return fmt.Errorf("Failed to apply license: %v (API errors: %s)", err, apiErr.ErrorsAsString("; "))
 			}
 			return fmt.Errorf("Failed to apply license: %v", err)
 		}
-		accountData = licensedAccountData
+		if changed {
+			slog.Info("remote license differs, updating via PUT")
+			slog.Info("license update completed")
+		} else {
+			slog.Info("remote license already matches target")
+		}
+		accountData.Account.License = finalAccount.License
 	}
 
 	// 生成密钥对
@@ -208,10 +216,10 @@ func handleRegistration(cmd *cobra.Command, configPath, customLicense string) er
 		return fmt.Errorf("Failed to generate key pair: %v", err)
 	}
 
-	log.Printf("Enrolling device key...")
+	slog.Info("enrolling device key")
 
 	// 注册设备密钥
-	updatedAccountData, apiErr, err := api.EnrollKey(accountData, pubKey, deviceName)
+	updatedAccountData, apiErr, err := enrollKeyFunc(accountData, pubKey, deviceName)
 	if err != nil {
 		if apiErr != nil {
 			return fmt.Errorf("Failed to enroll key: %v (API errors: %s)", err, apiErr.ErrorsAsString("; "))
@@ -219,7 +227,7 @@ func handleRegistration(cmd *cobra.Command, configPath, customLicense string) er
 		return fmt.Errorf("Failed to enroll key: %v", err)
 	}
 
-	log.Printf("Registration successful. Saving config...")
+	slog.Info("registration successful, saving config")
 
 	if len(updatedAccountData.Config.Peers) == 0 {
 		return fmt.Errorf("Failed to save config: register response has no peers")
@@ -254,7 +262,7 @@ func handleRegistration(cmd *cobra.Command, configPath, customLicense string) er
 		return fmt.Errorf("Failed to save config: %v", err)
 	}
 
-	log.Printf("Config saved to %s", configPath)
+	slog.Info("config saved", "path", configPath)
 
 	// 标记配置已加载
 	config.ConfigLoaded = true
@@ -265,32 +273,32 @@ func applyCustomLicense(configPath, customLicense string) error {
 	if config.AppConfig.ID == "" || config.AppConfig.AccessToken == "" {
 		return fmt.Errorf("Failed to apply license: missing id/access_token in config")
 	}
-	if config.AppConfig.License == customLicense {
-		log.Printf("License already set in config, skipping update")
-		return nil
-	}
 
 	accountData := models.AccountData{
 		ID:    config.AppConfig.ID,
 		Token: config.AppConfig.AccessToken,
-		Account: models.Account{
-			License: config.AppConfig.License,
-		},
 	}
 
-	updatedAccountData, apiErr, err := api.ApplyLicense(accountData, customLicense)
+	slog.Info("fetching remote account license")
+	finalAccount, changed, apiErr, err := rebindLicenseFunc(accountData, customLicense)
 	if err != nil {
 		if apiErr != nil {
 			return fmt.Errorf("Failed to apply license: %v (API errors: %s)", err, apiErr.ErrorsAsString("; "))
 		}
 		return fmt.Errorf("Failed to apply license: %v", err)
 	}
+	if changed {
+		slog.Info("remote license differs, updating via PUT")
+		slog.Info("license update completed")
+	} else {
+		slog.Info("remote license already matches target")
+	}
 
-	config.AppConfig.License = pickAccountLicense(updatedAccountData, accountData, customLicense)
+	config.AppConfig.License = finalAccount.License
 	if err := config.AppConfig.SaveConfig(configPath); err != nil {
 		return fmt.Errorf("Failed to save config after license update: %v", err)
 	}
-	log.Printf("License updated successfully")
+	slog.Info("license updated successfully")
 
 	return nil
 }
@@ -375,7 +383,7 @@ func normalizeDNSServerAddress(dns string) (string, error) {
 
 // setupAndRunSocksProxy 设置并运行SOCKS5代理
 func setupAndRunSocksProxy(cmd *cobra.Command) error {
-	log.Println("Preparing SOCKS5 proxy...")
+	slog.Info("preparing SOCKS5 proxy")
 
 	// 设置最大并发处理能力
 	runtime.GOMAXPROCS(runtime.NumCPU())
@@ -411,9 +419,9 @@ func setupAndRunSocksProxy(cmd *cobra.Command) error {
 	// 配置连接并启动隧道
 	readyCh := startTunnel(cmd, tlsConfig, endpoint, tunDev, tunNet, socksRuntime)
 
-	log.Println("Waiting for MASQUE connection before starting SOCKS5 proxy...")
+	slog.Info("waiting for MASQUE connection before starting SOCKS5 proxy listener")
 	<-readyCh
-	log.Println("MASQUE connection established. Starting SOCKS5 proxy listener...")
+	slog.Info("MASQUE connection established, starting SOCKS5 proxy listener")
 
 	// 创建并启动SOCKS服务器
 	return runSocksServer(socksRuntime, idleTimeout)
@@ -517,7 +525,7 @@ func createTunDevice(localAddresses, dnsAddrs []netip.Addr, cmd *cobra.Command) 
 	// 从配置中获取MTU
 	mtu := config.AppConfig.Socks.MTU
 	if mtu != 1280 {
-		log.Println("Warning: MTU is not the default 1280. This is not supported. Packet loss and other issues may occur.")
+		slog.Warn("MTU is not default 1280; packet loss or other issues may occur", "mtu", mtu)
 	}
 
 	tunDev, tunNet, err := netstack.CreateNetTUN(localAddresses, dnsAddrs, mtu)
@@ -566,7 +574,7 @@ func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint *net.UDPAdd
 				return
 			}
 			socksRuntime.SetTunnelUp(false)
-			log.Printf("tunnel_down: %v", err)
+			slog.Warn("tunnel down", "error", err)
 			socksRuntime.RestartAndDrain(err)
 		},
 	}
@@ -586,7 +594,7 @@ func prepareSocksRuntime(tunNet *netstack.Net, connectionTimeout, idleTimeout ti
 	var resolver socks5.NameResolver
 	if config.AppConfig.Socks.RemoteDNS {
 		// 使用TunnelDNSResolver，让DNS通过TUN隧道
-		log.Println("Using remote DNS resolver through TUN tunnel")
+		slog.Info("using remote DNS resolver through TUN tunnel")
 
 		// 解析DNS服务器地址
 		var dnsAddrs []netip.Addr
@@ -601,7 +609,7 @@ func prepareSocksRuntime(tunNet *netstack.Net, connectionTimeout, idleTimeout ti
 		resolver = api.NewTunnelDNSResolver(tunNet, dnsAddrs, config.AppConfig.Socks.DNSTimeout.Duration())
 	} else {
 		// 使用本地DNS解析器
-		log.Println("Using local DNS resolver")
+		slog.Info("using local DNS resolver")
 		dnsTimeout := config.AppConfig.Socks.DNSTimeout.Duration()
 		if len(config.AppConfig.Socks.DNS) > 0 {
 			dnsServer, err := normalizeDNSServerAddress(config.AppConfig.Socks.DNS[0])
@@ -622,7 +630,7 @@ func prepareSocksRuntime(tunNet *netstack.Net, connectionTimeout, idleTimeout ti
 	}
 
 	if config.AppConfig.Socks.BlockUDP443 {
-		log.Println("UDP/443 blocking is enabled: outbound QUIC/UDP will be rejected")
+		slog.Info("UDP/443 blocking enabled; outbound QUIC/UDP will be rejected")
 	}
 
 	// 仅负责实际拨号，不做隧道状态门控；门控由socksRuntime统一处理。
@@ -667,8 +675,15 @@ func runSocksServer(socksRuntime *socksRuntime, idleTimeout time.Duration) error
 	port := config.AppConfig.Socks.Port
 
 	// 启动监听
-	log.Printf("SOCKS proxy listening on %s:%s with timeouts (connect: %s, idle: %s)",
-		bindAddress, port, config.AppConfig.Socks.ConnectionTimeout.Duration(), idleTimeout)
+	slog.Info(
+		"SOCKS proxy listening",
+		"addr",
+		net.JoinHostPort(bindAddress, port),
+		"connect_timeout",
+		config.AppConfig.Socks.ConnectionTimeout.Duration(),
+		"idle_timeout",
+		idleTimeout,
+	)
 
 	listener, err := net.Listen("tcp", net.JoinHostPort(bindAddress, port))
 	if err != nil {
@@ -678,7 +693,7 @@ func runSocksServer(socksRuntime *socksRuntime, idleTimeout time.Duration) error
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			log.Printf("Failed to accept connection: %v\n", err)
+			slog.Warn("failed to accept connection", "error", err)
 			continue
 		}
 
@@ -693,14 +708,14 @@ func runSocksServer(socksRuntime *socksRuntime, idleTimeout time.Duration) error
 		trackedConn := socksRuntime.TrackConn(timeoutConn)
 		server := socksRuntime.CurrentServer()
 		if server == nil {
-			log.Println("Failed to serve SOCKS connection: server unavailable")
+			slog.Warn("failed to serve SOCKS connection: server unavailable")
 			_ = trackedConn.Close()
 			continue
 		}
 
 		go func(server *socks5.Server, conn net.Conn) {
 			if err := server.ServeConn(conn); err != nil && !errors.Is(err, net.ErrClosed) {
-				log.Printf("Failed to serve SOCKS connection: %v", err)
+				slog.Debug("failed to serve SOCKS connection", "error", err)
 			}
 			_ = conn.Close()
 		}(server, trackedConn)
@@ -711,13 +726,15 @@ func runSocksServer(socksRuntime *socksRuntime, idleTimeout time.Duration) error
 func createSocksServer(username, password string, dialFunc func(ctx context.Context, network, addr string) (net.Conn, error), resolver socks5.NameResolver) *socks5.Server {
 	buf := api.NewNetBuffer(32 * 1024) // 32KB buffer
 	if buf == nil {
-		log.Println("Failed to create buffer")
+		slog.Error("failed to create buffer pool for SOCKS5")
 		return nil
 	}
 
+	logger := socks5SlogLogger{}
+
 	if username == "" || password == "" {
 		return socks5.NewServer(
-			socks5.WithLogger(socks5.NewLogger(log.New(os.Stdout, "socks5: ", log.LstdFlags))),
+			socks5.WithLogger(logger),
 			socks5.WithDial(dialFunc),
 			socks5.WithResolver(resolver),
 			socks5.WithBufferPool(buf),
@@ -725,7 +742,7 @@ func createSocksServer(username, password string, dialFunc func(ctx context.Cont
 	} else {
 
 		return socks5.NewServer(
-			socks5.WithLogger(socks5.NewLogger(log.New(os.Stdout, "socks5: ", log.LstdFlags))),
+			socks5.WithLogger(logger),
 			socks5.WithDial(dialFunc),
 			socks5.WithResolver(resolver),
 			socks5.WithAuthMethods([]socks5.Authenticator{
@@ -737,4 +754,10 @@ func createSocksServer(username, password string, dialFunc func(ctx context.Cont
 			socks5.WithBufferPool(buf),
 		)
 	}
+}
+
+type socks5SlogLogger struct{}
+
+func (socks5SlogLogger) Errorf(format string, args ...interface{}) {
+	slog.Error(fmt.Sprintf("socks5: "+format, args...))
 }

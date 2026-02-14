@@ -8,6 +8,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -64,16 +65,19 @@ type Config struct {
 
 	// 注册信息
 	Registration RegistrationInfo `json:"registration"` // 注册相关信息
+
+	// 日志配置
+	Logging LoggingConfig `json:"logging"` // 日志输出级别和格式
 }
 
 // SocksConfig 包含SOCKS5代理相关的配置
 type SocksConfig struct {
-	BindAddress       string        `json:"bind_address"`        // 代理绑定的地址
-	Port              string        `json:"port"`                // 代理监听的端口
-	Username          string        `json:"username"`            // 代理认证的用户名
-	Password          string        `json:"password"`            // 代理认证的密码
-	ConnectPort       int           `json:"connect_port"`        // MASQUE连接使用的端口
-	DNS               []string      `json:"dns"`                 // 在MASQUE隧道内使用的DNS服务器
+	BindAddress       string   `json:"bind_address"`        // 代理绑定的地址
+	Port              string   `json:"port"`                // 代理监听的端口
+	Username          string   `json:"username"`            // 代理认证的用户名
+	Password          string   `json:"password"`            // 代理认证的密码
+	ConnectPort       int      `json:"connect_port"`        // MASQUE连接使用的端口
+	DNS               []string `json:"dns"`                 // 在MASQUE隧道内使用的DNS服务器
 	DNSTimeout        Duration `json:"dns_timeout"`         // DNS查询超时时间（超时后尝试下一个服务器）
 	RemoteDNS         bool     `json:"remote_dns"`          // 是否使用远程DNS（通过TUN隧道），false则使用本地DNS
 	UseIPv6           bool     `json:"use_ipv6"`            // 是否使用IPv6进行MASQUE连接
@@ -87,7 +91,13 @@ type SocksConfig struct {
 	ReconnectDelay    Duration `json:"reconnect_delay"`     // 重连尝试之间的延迟
 	ConnectionTimeout Duration `json:"connection_timeout"`  // 建立连接的超时时间
 	IdleTimeout       Duration `json:"idle_timeout"`        // 空闲连接的超时时间
-	SelfCheck         bool          `json:"self_check"`          // 是否启用隧道自检并在连续失败后重连
+	SelfCheck         bool     `json:"self_check"`          // 是否启用隧道自检并在连续失败后重连
+}
+
+// LoggingConfig 包含日志相关的配置
+type LoggingConfig struct {
+	Level  string `json:"level"`  // 日志级别: debug/info/warn/error
+	Format string `json:"format"` // 日志格式: text/json
 }
 
 // RegistrationInfo 包含注册相关的信息
@@ -126,6 +136,14 @@ func LoadConfig(configPath string) error {
 		AppConfig.Socks = GetDefaultSocksConfig()
 	}
 
+	defaultLogging := GetDefaultLoggingConfig()
+	if strings.TrimSpace(AppConfig.Logging.Level) == "" {
+		AppConfig.Logging.Level = defaultLogging.Level
+	}
+	if strings.TrimSpace(AppConfig.Logging.Format) == "" {
+		AppConfig.Logging.Format = defaultLogging.Format
+	}
+
 	ConfigLoaded = true
 
 	return nil
@@ -155,6 +173,47 @@ func GetDefaultSocksConfig() SocksConfig {
 		IdleTimeout:       Duration(5 * time.Minute),
 		SelfCheck:         false,
 	}
+}
+
+// GetDefaultLoggingConfig 返回默认日志配置
+func GetDefaultLoggingConfig() LoggingConfig {
+	return LoggingConfig{
+		Level:  "info",
+		Format: "text",
+	}
+}
+
+// NormalizeLoggingConfig 规范化日志配置，并返回无效配置项说明。
+func NormalizeLoggingConfig(cfg LoggingConfig) (LoggingConfig, []string) {
+	normalized := cfg
+	defaults := GetDefaultLoggingConfig()
+	var issues []string
+
+	level := strings.ToLower(strings.TrimSpace(cfg.Level))
+	switch level {
+	case "", "debug", "info", "warn", "error":
+		if level == "" {
+			level = defaults.Level
+		}
+	default:
+		issues = append(issues, fmt.Sprintf("level=%q -> %q", cfg.Level, defaults.Level))
+		level = defaults.Level
+	}
+	normalized.Level = level
+
+	format := strings.ToLower(strings.TrimSpace(cfg.Format))
+	switch format {
+	case "", "text", "json":
+		if format == "" {
+			format = defaults.Format
+		}
+	default:
+		issues = append(issues, fmt.Sprintf("format=%q -> %q", cfg.Format, defaults.Format))
+		format = defaults.Format
+	}
+	normalized.Format = format
+
+	return normalized, issues
 }
 
 // SaveConfig writes the current application configuration to a prettified JSON file.
@@ -211,6 +270,7 @@ func InitNewConfig(
 		IPv4:           ipv4,
 		IPv6:           ipv6,
 		Socks:          GetDefaultSocksConfig(),
+		Logging:        GetDefaultLoggingConfig(),
 		Registration: RegistrationInfo{
 			DeviceName: deviceName,
 		},

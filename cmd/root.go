@@ -1,9 +1,13 @@
 package cmd
 
 import (
-	"log"
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
 
 	"github.com/HynoR/uscf/config"
+	"github.com/HynoR/uscf/internal/logging"
 	"github.com/spf13/cobra"
 )
 
@@ -11,18 +15,27 @@ var rootCmd = &cobra.Command{
 	Use:   "usque",
 	Short: "Usque Warp CLI",
 	Long:  "An unofficial Cloudflare Warp CLI that uses the MASQUE protocol and exposes the tunnel as various different services.",
-	PersistentPreRun: func(cmd *cobra.Command, args []string) {
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		configPath, err := cmd.Flags().GetString("config")
 		if err != nil {
-			log.Fatalf("Failed to get config path: %v", err)
+			return fmt.Errorf("failed to get config path: %w", err)
 		}
 
 		if configPath != "" {
 			if err := config.LoadConfig(configPath); err != nil {
-				log.Printf("Config file not found: %v", err)
-				log.Printf("You may only use the register command to generate one.")
+				if errors.Is(err, os.ErrNotExist) {
+					slog.Info("config file not found, continuing without preloaded config", "path", configPath)
+					return nil
+				}
+
+				slog.Warn("failed to load config, continuing without preloaded config", "path", configPath, "error", err)
+				return nil
 			}
+
+			config.AppConfig.Logging = logging.Setup(config.AppConfig.Logging)
 		}
+
+		return nil
 	},
 }
 
