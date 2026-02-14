@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -220,15 +221,26 @@ func handleRegistration(cmd *cobra.Command, configPath, customLicense string) er
 
 	log.Printf("Registration successful. Saving config...")
 
+	if len(updatedAccountData.Config.Peers) == 0 {
+		return fmt.Errorf("Failed to save config: register response has no peers")
+	}
+	peer := updatedAccountData.Config.Peers[0]
+
+	endpointV4, err := parseEndpointHost(peer.Endpoint.V4)
+	if err != nil {
+		return fmt.Errorf("Failed to parse IPv4 endpoint: %v", err)
+	}
+	endpointV6, err := parseEndpointHost(peer.Endpoint.V6)
+	if err != nil {
+		return fmt.Errorf("Failed to parse IPv6 endpoint: %v", err)
+	}
+
 	// 保存配置，使用InitNewConfig创建带有默认值的配置
 	config.AppConfig = config.InitNewConfig(
 		base64.StdEncoding.EncodeToString(privKey),
-		// TODO: proper endpoint parsing in utils
-		// strip :0
-		updatedAccountData.Config.Peers[0].Endpoint.V4[:len(updatedAccountData.Config.Peers[0].Endpoint.V4)-2],
-		// strip [ from beginning and ]:0 from end
-		updatedAccountData.Config.Peers[0].Endpoint.V6[1:len(updatedAccountData.Config.Peers[0].Endpoint.V6)-3],
-		updatedAccountData.Config.Peers[0].PublicKey,
+		endpointV4,
+		endpointV6,
+		peer.PublicKey,
 		pickAccountLicense(updatedAccountData, accountData, customLicense),
 		updatedAccountData.ID,
 		accountData.Token,
@@ -291,6 +303,74 @@ func pickAccountLicense(primary models.AccountData, fallback models.AccountData,
 		return fallback.Account.License
 	}
 	return customLicense
+}
+
+func parseEndpointHost(endpoint string) (string, error) {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		return "", fmt.Errorf("empty endpoint")
+	}
+
+	// Most API responses are host:port or [host]:port.
+	if host, _, err := net.SplitHostPort(endpoint); err == nil {
+		host = strings.Trim(host, "[]")
+		if addr, parseErr := netip.ParseAddr(host); parseErr == nil {
+			return addr.String(), nil
+		}
+		return host, nil
+	}
+
+	// Some responses may contain a bare address without port.
+	trimmed := strings.Trim(endpoint, "[]")
+	if addr, err := netip.ParseAddr(trimmed); err == nil {
+		return addr.String(), nil
+	}
+
+	// Handle non-bracketed IPv6 with trailing ":port" defensively.
+	if strings.Count(endpoint, ":") > 1 {
+		lastColon := strings.LastIndex(endpoint, ":")
+		if lastColon > 0 && lastColon < len(endpoint)-1 {
+			hostPart := endpoint[:lastColon]
+			portPart := endpoint[lastColon+1:]
+			if _, err := strconv.Atoi(portPart); err == nil {
+				if addr, parseErr := netip.ParseAddr(hostPart); parseErr == nil {
+					return addr.String(), nil
+				}
+			}
+		}
+	}
+
+	return "", fmt.Errorf("unsupported endpoint format: %q", endpoint)
+}
+
+func normalizeDNSServerAddress(dns string) (string, error) {
+	dns = strings.TrimSpace(dns)
+	if dns == "" {
+		return "", fmt.Errorf("empty DNS server")
+	}
+
+	if host, port, err := net.SplitHostPort(dns); err == nil {
+		if host == "" {
+			return "", fmt.Errorf("missing DNS host in %q", dns)
+		}
+		portNumber, convErr := strconv.Atoi(port)
+		if convErr != nil || portNumber <= 0 || portNumber > 65535 {
+			return "", fmt.Errorf("invalid DNS port in %q", dns)
+		}
+		return net.JoinHostPort(host, port), nil
+	}
+
+	trimmed := strings.Trim(dns, "[]")
+	if addr, err := netip.ParseAddr(trimmed); err == nil {
+		return net.JoinHostPort(addr.String(), "53"), nil
+	}
+
+	// Allow domain names without port and default to 53.
+	if !strings.Contains(dns, ":") {
+		return net.JoinHostPort(dns, "53"), nil
+	}
+
+	return "", fmt.Errorf("invalid DNS server address %q", dns)
 }
 
 // setupAndRunSocksProxy 设置并运行SOCKS5代理
@@ -524,13 +604,12 @@ func prepareSocksRuntime(tunNet *netstack.Net, connectionTimeout, idleTimeout ti
 		log.Println("Using local DNS resolver")
 		dnsTimeout := config.AppConfig.Socks.DNSTimeout.Duration()
 		if len(config.AppConfig.Socks.DNS) > 0 {
-			// 检查 ip 后有没有端口 如果没有 加上:53
-			ip := config.AppConfig.Socks.DNS[0]
-			if !strings.Contains(ip, ":") {
-				ip = ip + ":53"
+			dnsServer, err := normalizeDNSServerAddress(config.AppConfig.Socks.DNS[0])
+			if err != nil {
+				return nil, fmt.Errorf("Failed to parse local DNS server %s: %v", config.AppConfig.Socks.DNS[0], err)
 			}
 			resolver = api.NewCachingDNSResolver(
-				ip,
+				dnsServer,
 				dnsTimeout,
 			)
 		} else {
