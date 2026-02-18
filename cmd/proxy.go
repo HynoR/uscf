@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand"
 	"net"
 	"net/netip"
 	"runtime"
@@ -406,6 +407,79 @@ func parseEndpointHost(endpoint string) (string, error) {
 	return "", fmt.Errorf("unsupported endpoint format: %q", endpoint)
 }
 
+func udpAddrFromHost(host string, port int, useIPv6 bool) (*net.UDPAddr, error) {
+	normalizedHost, err := parseEndpointHost(host)
+	if err != nil {
+		return nil, err
+	}
+	ip := net.ParseIP(normalizedHost)
+	if ip == nil {
+		return nil, fmt.Errorf("invalid endpoint IP: %q", normalizedHost)
+	}
+	if useIPv6 && ip.To4() != nil {
+		return nil, fmt.Errorf("expected IPv6 endpoint, got IPv4: %s", normalizedHost)
+	}
+	if !useIPv6 && ip.To4() == nil {
+		return nil, fmt.Errorf("expected IPv4 endpoint, got IPv6: %s", normalizedHost)
+	}
+
+	return &net.UDPAddr{IP: ip, Port: port}, nil
+}
+
+func buildCustomEndpointPool(customHosts []string, port int, useIPv6 bool) []*net.UDPAddr {
+	candidates := make([]*net.UDPAddr, 0, len(customHosts))
+	seen := make(map[string]struct{})
+	for _, raw := range customHosts {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+
+		addr, err := udpAddrFromHost(raw, port, useIPv6)
+		if err != nil {
+			slog.Warn("ignoring invalid custom endpoint", "endpoint", raw, "error", err)
+			continue
+		}
+
+		key := addr.IP.String()
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		candidates = append(candidates, addr)
+	}
+
+	return candidates
+}
+
+func newEndpointSelector(candidates []*net.UDPAddr) func() *net.UDPAddr {
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	var mu sync.Mutex
+
+	return func() *net.UDPAddr {
+		mu.Lock()
+		idx := rng.Intn(len(candidates))
+		selected := candidates[idx]
+		mu.Unlock()
+
+		return &net.UDPAddr{
+			IP:   append(net.IP(nil), selected.IP...),
+			Port: selected.Port,
+		}
+	}
+}
+
+func familyLabel(useIPv6 bool) string {
+	if useIPv6 {
+		return "ipv6"
+	}
+	return "ipv4"
+}
+
 func normalizeDNSServerAddress(dns string) (string, error) {
 	dns = strings.TrimSpace(dns)
 	if dns == "" {
@@ -450,7 +524,7 @@ func setupAndRunSocksProxy(cmd *cobra.Command) error {
 	}
 
 	// 准备网络配置
-	endpoint, localAddresses, dnsAddrs, err := prepareNetworkConfig(cmd)
+	endpoint, endpointSelector, localAddresses, dnsAddrs, err := prepareNetworkConfig(cmd)
 	if err != nil {
 		return err
 	}
@@ -472,7 +546,7 @@ func setupAndRunSocksProxy(cmd *cobra.Command) error {
 	}
 
 	// 配置连接并启动隧道
-	readyCh := startTunnel(cmd, tlsConfig, endpoint, tunDev, tunNet, socksRuntime)
+	readyCh := startTunnel(cmd, tlsConfig, endpoint, endpointSelector, tunDev, tunNet, socksRuntime)
 
 	slog.Info("waiting for MASQUE connection before starting SOCKS5 proxy listener")
 	<-readyCh
@@ -512,22 +586,30 @@ func prepareTlsConfig(cmd *cobra.Command) (*tls.Config, error) {
 }
 
 // prepareNetworkConfig 准备网络配置
-func prepareNetworkConfig(cmd *cobra.Command) (*net.UDPAddr, []netip.Addr, []netip.Addr, error) {
+func prepareNetworkConfig(cmd *cobra.Command) (*net.UDPAddr, func() *net.UDPAddr, []netip.Addr, []netip.Addr, error) {
 	// 从配置文件获取连接端口
 	connectPort := config.AppConfig.Socks.ConnectPort
 
-	// 确定使用IPv4还是IPv6端点
-	var endpoint *net.UDPAddr
-	if !config.AppConfig.Socks.UseIPv6 {
-		endpoint = &net.UDPAddr{
-			IP:   net.ParseIP(config.AppConfig.EndpointV4),
-			Port: connectPort,
-		}
-	} else {
-		endpoint = &net.UDPAddr{
-			IP:   net.ParseIP(config.AppConfig.EndpointV6),
-			Port: connectPort,
-		}
+	useIPv6 := config.AppConfig.Socks.UseIPv6
+	fallbackHost := config.AppConfig.EndpointV4
+	customHosts := config.AppConfig.CustomEndpointsV4
+	if useIPv6 {
+		fallbackHost = config.AppConfig.EndpointV6
+		customHosts = config.AppConfig.CustomEndpointsV6
+	}
+
+	fallbackEndpoint, err := udpAddrFromHost(fallbackHost, connectPort, useIPv6)
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("failed to parse fallback endpoint: %w", err)
+	}
+
+	candidateEndpoints := buildCustomEndpointPool(customHosts, connectPort, useIPv6)
+	var endpointSelector func() *net.UDPAddr
+	if len(candidateEndpoints) > 0 {
+		endpointSelector = newEndpointSelector(candidateEndpoints)
+		slog.Info("custom endpoint pool enabled", "family", familyLabel(useIPv6), "count", len(candidateEndpoints))
+	} else if len(customHosts) > 0 {
+		slog.Warn("custom endpoint list configured but no valid entries; using fallback endpoint", "family", familyLabel(useIPv6))
 	}
 
 	// 隧道内IP设置
@@ -535,14 +617,14 @@ func prepareNetworkConfig(cmd *cobra.Command) (*net.UDPAddr, []netip.Addr, []net
 	if !config.AppConfig.Socks.NoTunnelIPv4 {
 		v4, err := netip.ParseAddr(config.AppConfig.IPv4)
 		if err != nil {
-			return nil, nil, nil, fmt.Errorf("Failed to parse IPv4 address: %v", err)
+			return nil, nil, nil, nil, fmt.Errorf("Failed to parse IPv4 address: %v", err)
 		}
 		localAddresses = append(localAddresses, v4)
 	}
 	if !config.AppConfig.Socks.NoTunnelIPv6 {
 		v6, err := netip.ParseAddr(config.AppConfig.IPv6)
 		if err != nil {
-			return nil, nil, nil, fmt.Errorf("Failed to parse IPv6 address: %v", err)
+			return nil, nil, nil, nil, fmt.Errorf("Failed to parse IPv6 address: %v", err)
 		}
 		localAddresses = append(localAddresses, v6)
 	}
@@ -552,12 +634,12 @@ func prepareNetworkConfig(cmd *cobra.Command) (*net.UDPAddr, []netip.Addr, []net
 	for _, dns := range config.AppConfig.Socks.DNS {
 		addr, err := netip.ParseAddr(dns)
 		if err != nil {
-			return nil, nil, nil, fmt.Errorf("Failed to parse DNS server: %v", err)
+			return nil, nil, nil, nil, fmt.Errorf("Failed to parse DNS server: %v", err)
 		}
 		dnsAddrs = append(dnsAddrs, addr)
 	}
 
-	return endpoint, localAddresses, dnsAddrs, nil
+	return fallbackEndpoint, endpointSelector, localAddresses, dnsAddrs, nil
 }
 
 // getTimeoutSettings 获取超时设置
@@ -594,7 +676,7 @@ func createTunDevice(localAddresses, dnsAddrs []netip.Addr, cmd *cobra.Command) 
 }
 
 // startTunnel 配置并启动隧道连接
-func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint *net.UDPAddr, tunDev tun.Device, tunNet *netstack.Net, socksRuntime *socksRuntime) <-chan struct{} {
+func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint *net.UDPAddr, endpointSelector func() *net.UDPAddr, tunDev tun.Device, tunNet *netstack.Net, socksRuntime *socksRuntime) <-chan struct{} {
 	readyCh := make(chan struct{})
 	var readyOnce sync.Once
 
@@ -603,17 +685,20 @@ func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint *net.UDPAdd
 	initialPacketSize := config.AppConfig.Socks.InitialPacketSize
 	mtu := config.AppConfig.Socks.MTU
 	reconnectDelay := config.AppConfig.Socks.ReconnectDelay.Duration()
+	maxReconnectAttempts := config.AppConfig.Socks.MaxReconnectAttempts
 
 	configTunnel := api.ConnectionConfig{
-		TLSConfig:         tlsConfig,
-		KeepAlivePeriod:   keepalivePeriod,
-		InitialPacketSize: initialPacketSize,
-		Endpoint:          endpoint,
-		MTU:               mtu,
-		MaxPacketRate:     8192,
-		MaxBurst:          1024,
-		SelfCheckEnabled:  config.AppConfig.Socks.SelfCheck,
-		SelfCheckDialFunc: tunNet.DialContext,
+		TLSConfig:            tlsConfig,
+		KeepAlivePeriod:      keepalivePeriod,
+		InitialPacketSize:    initialPacketSize,
+		Endpoint:             endpoint,
+		EndpointSelector:     endpointSelector,
+		MTU:                  mtu,
+		MaxPacketRate:        8192,
+		MaxBurst:             1024,
+		MaxReconnectAttempts: maxReconnectAttempts,
+		SelfCheckEnabled:     config.AppConfig.Socks.SelfCheck,
+		SelfCheckDialFunc:    tunNet.DialContext,
 		ReconnectStrategy: &api.ExponentialBackoff{
 			InitialDelay: reconnectDelay,
 			MaxDelay:     5 * time.Minute,

@@ -135,3 +135,58 @@ func TestHandleConnectionNoOnDisconnectedBeforeEstablished(t *testing.T) {
 		t.Fatalf("expected OnDisconnected not to be called before establishment, got: %d", disconnectedCount)
 	}
 }
+
+func TestHandleConnectionUsesEndpointSelectorPerAttempt(t *testing.T) {
+	oldConnectTunnelFunc := connectTunnelFunc
+	oldHandleForwardingFn := handleForwardingFn
+	oldRunSelfCheckLoopFn := runSelfCheckLoopFn
+	defer func() {
+		connectTunnelFunc = oldConnectTunnelFunc
+		handleForwardingFn = oldHandleForwardingFn
+		runSelfCheckLoopFn = oldRunSelfCheckLoopFn
+	}()
+
+	var dialed []string
+	connectTunnelFunc = func(
+		ctx context.Context,
+		tlsConfig *tls.Config,
+		quicConfig *quic.Config,
+		connectURI string,
+		endpoint *net.UDPAddr,
+	) (*net.UDPConn, *http3.Transport, *connectip.Conn, *http.Response, error) {
+		dialed = append(dialed, endpoint.IP.String())
+		return nil, nil, nil, &http.Response{StatusCode: http.StatusServiceUnavailable, Status: "503 Service Unavailable"}, nil
+	}
+
+	endpoints := []*net.UDPAddr{
+		{IP: net.ParseIP("1.1.1.1"), Port: 443},
+		{IP: net.ParseIP("1.1.1.2"), Port: 443},
+	}
+	selectorCalls := 0
+	cfg := ConnectionConfig{
+		TLSConfig:         &tls.Config{},
+		KeepAlivePeriod:   time.Second,
+		InitialPacketSize: 1242,
+		Endpoint:          &net.UDPAddr{IP: net.ParseIP("9.9.9.9"), Port: 443},
+		EndpointSelector: func() *net.UDPAddr {
+			picked := endpoints[selectorCalls%len(endpoints)]
+			selectorCalls++
+			return picked
+		},
+		MTU:              1280,
+		SelfCheckEnabled: false,
+	}
+
+	_, _ = handleConnection(context.Background(), cfg, noopTunnelDevice{}, &TunnelStats{}, 0)
+	_, _ = handleConnection(context.Background(), cfg, noopTunnelDevice{}, &TunnelStats{}, 1)
+
+	if selectorCalls != 2 {
+		t.Fatalf("expected selector to be called per attempt, got %d", selectorCalls)
+	}
+	if len(dialed) != 2 {
+		t.Fatalf("expected two dial attempts, got %d", len(dialed))
+	}
+	if dialed[0] != "1.1.1.1" || dialed[1] != "1.1.1.2" {
+		t.Fatalf("unexpected selected endpoints: %#v", dialed)
+	}
+}

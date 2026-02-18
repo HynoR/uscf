@@ -50,15 +50,17 @@ func (d Duration) Duration() time.Duration {
 // Config represents the application configuration structure, containing essential details such as keys, endpoints, and access tokens.
 type Config struct {
 	// 连接信息
-	PrivateKey     string `json:"private_key"`      // Base64-encoded ECDSA private key
-	EndpointV4     string `json:"endpoint_v4"`      // IPv4 address of the endpoint
-	EndpointV6     string `json:"endpoint_v6"`      // IPv6 address of the endpoint
-	EndpointPubKey string `json:"endpoint_pub_key"` // PEM-encoded ECDSA public key of the endpoint to verify against
-	License        string `json:"license"`          // Application license key
-	ID             string `json:"id"`               // Device unique identifier
-	AccessToken    string `json:"access_token"`     // Authentication token for API access
-	IPv4           string `json:"ipv4"`             // Assigned IPv4 address
-	IPv6           string `json:"ipv6"`             // Assigned IPv6 address
+	PrivateKey        string   `json:"private_key"`         // Base64-encoded ECDSA private key
+	EndpointV4        string   `json:"endpoint_v4"`         // IPv4 address of the endpoint
+	EndpointV6        string   `json:"endpoint_v6"`         // IPv6 address of the endpoint
+	CustomEndpointsV4 []string `json:"custom_endpoints_v4"` // Optional IPv4 endpoint pool used by runtime
+	CustomEndpointsV6 []string `json:"custom_endpoints_v6"` // Optional IPv6 endpoint pool used by runtime
+	EndpointPubKey    string   `json:"endpoint_pub_key"`    // PEM-encoded ECDSA public key of the endpoint to verify against
+	License           string   `json:"license"`             // Application license key
+	ID                string   `json:"id"`                  // Device unique identifier
+	AccessToken       string   `json:"access_token"`        // Authentication token for API access
+	IPv4              string   `json:"ipv4"`                // Assigned IPv4 address
+	IPv6              string   `json:"ipv6"`                // Assigned IPv6 address
 
 	// SOCKS代理配置
 	Socks SocksConfig `json:"socks"` // SOCKS5代理相关配置
@@ -72,26 +74,27 @@ type Config struct {
 
 // SocksConfig 包含SOCKS5代理相关的配置
 type SocksConfig struct {
-	BindAddress       string   `json:"bind_address"`        // 代理绑定的地址
-	Port              string   `json:"port"`                // 代理监听的端口
-	Username          string   `json:"username"`            // 代理认证的用户名
-	Password          string   `json:"password"`            // 代理认证的密码
-	ConnectPort       int      `json:"connect_port"`        // MASQUE连接使用的端口
-	DNS               []string `json:"dns"`                 // 在MASQUE隧道内使用的DNS服务器
-	DNSTimeout        Duration `json:"dns_timeout"`         // DNS查询超时时间（超时后尝试下一个服务器）
-	RemoteDNS         bool     `json:"remote_dns"`          // 是否使用远程DNS（通过TUN隧道），false则使用本地DNS
-	UseIPv6           bool     `json:"use_ipv6"`            // 是否使用IPv6进行MASQUE连接
-	NoTunnelIPv4      bool     `json:"no_tunnel_ipv4"`      // 是否在MASQUE隧道内禁用IPv4
-	NoTunnelIPv6      bool     `json:"no_tunnel_ipv6"`      // 是否在MASQUE隧道内禁用IPv6
-	BlockUDP443       bool     `json:"block_udp_443"`       // Whether to block outbound UDP/443 (QUIC)
-	SNIAddress        string   `json:"sni_address"`         // MASQUE连接使用的SNI地址
-	KeepalivePeriod   Duration `json:"keepalive_period"`    // MASQUE连接的心跳周期
-	MTU               int      `json:"mtu"`                 // MASQUE连接的MTU
-	InitialPacketSize uint16   `json:"initial_packet_size"` // MASQUE连接的初始包大小
-	ReconnectDelay    Duration `json:"reconnect_delay"`     // 重连尝试之间的延迟
-	ConnectionTimeout Duration `json:"connection_timeout"`  // 建立连接的超时时间
-	IdleTimeout       Duration `json:"idle_timeout"`        // 空闲连接的超时时间
-	SelfCheck         bool     `json:"self_check"`          // 是否启用隧道自检并在连续失败后重连
+	BindAddress          string   `json:"bind_address"`           // 代理绑定的地址
+	Port                 string   `json:"port"`                   // 代理监听的端口
+	Username             string   `json:"username"`               // 代理认证的用户名
+	Password             string   `json:"password"`               // 代理认证的密码
+	ConnectPort          int      `json:"connect_port"`           // MASQUE连接使用的端口
+	DNS                  []string `json:"dns"`                    // 在MASQUE隧道内使用的DNS服务器
+	DNSTimeout           Duration `json:"dns_timeout"`            // DNS查询超时时间（超时后尝试下一个服务器）
+	RemoteDNS            bool     `json:"remote_dns"`             // 是否使用远程DNS（通过TUN隧道），false则使用本地DNS
+	UseIPv6              bool     `json:"use_ipv6"`               // 是否使用IPv6进行MASQUE连接
+	NoTunnelIPv4         bool     `json:"no_tunnel_ipv4"`         // 是否在MASQUE隧道内禁用IPv4
+	NoTunnelIPv6         bool     `json:"no_tunnel_ipv6"`         // 是否在MASQUE隧道内禁用IPv6
+	BlockUDP443          bool     `json:"block_udp_443"`          // Whether to block outbound UDP/443 (QUIC)
+	SNIAddress           string   `json:"sni_address"`            // MASQUE连接使用的SNI地址
+	KeepalivePeriod      Duration `json:"keepalive_period"`       // MASQUE连接的心跳周期
+	MTU                  int      `json:"mtu"`                    // MASQUE连接的MTU
+	InitialPacketSize    uint16   `json:"initial_packet_size"`    // MASQUE连接的初始包大小
+	ReconnectDelay       Duration `json:"reconnect_delay"`        // 重连尝试之间的延迟
+	MaxReconnectAttempts int      `json:"max_reconnect_attempts"` // 连续连接失败阈值；达到后暂停重连等待人工处理，0表示无限重试
+	ConnectionTimeout    Duration `json:"connection_timeout"`     // 建立连接的超时时间
+	IdleTimeout          Duration `json:"idle_timeout"`           // 空闲连接的超时时间
+	SelfCheck            bool     `json:"self_check"`             // 是否启用隧道自检并在连续失败后重连
 }
 
 // LoggingConfig 包含日志相关的配置
@@ -152,26 +155,27 @@ func LoadConfig(configPath string) error {
 // GetDefaultSocksConfig 返回默认的SOCKS代理配置
 func GetDefaultSocksConfig() SocksConfig {
 	return SocksConfig{
-		BindAddress:       "127.0.0.1",
-		Port:              "1080",
-		Username:          "",
-		Password:          "",
-		ConnectPort:       443,
-		DNS:               []string{"1.1.1.1", "8.8.8.8"},
-		DNSTimeout:        Duration(2 * time.Second),
-		RemoteDNS:         false,
-		UseIPv6:           false,
-		NoTunnelIPv4:      false,
-		NoTunnelIPv6:      false,
-		BlockUDP443:       true,
-		SNIAddress:        "", // 这应当从internal.ConnectSNI读取，但现在我们不修改其他文件
-		KeepalivePeriod:   Duration(30 * time.Second),
-		MTU:               1280,
-		InitialPacketSize: 1242,
-		ReconnectDelay:    Duration(1 * time.Second),
-		ConnectionTimeout: Duration(30 * time.Second),
-		IdleTimeout:       Duration(5 * time.Minute),
-		SelfCheck:         false,
+		BindAddress:          "127.0.0.1",
+		Port:                 "1080",
+		Username:             "",
+		Password:             "",
+		ConnectPort:          443,
+		DNS:                  []string{"1.1.1.1", "8.8.8.8"},
+		DNSTimeout:           Duration(2 * time.Second),
+		RemoteDNS:            false,
+		UseIPv6:              false,
+		NoTunnelIPv4:         false,
+		NoTunnelIPv6:         false,
+		BlockUDP443:          true,
+		SNIAddress:           "", // 这应当从internal.ConnectSNI读取，但现在我们不修改其他文件
+		KeepalivePeriod:      Duration(30 * time.Second),
+		MTU:                  1280,
+		InitialPacketSize:    1242,
+		ReconnectDelay:       Duration(1 * time.Second),
+		MaxReconnectAttempts: 0,
+		ConnectionTimeout:    Duration(30 * time.Second),
+		IdleTimeout:          Duration(5 * time.Minute),
+		SelfCheck:            false,
 	}
 }
 

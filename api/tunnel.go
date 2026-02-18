@@ -197,18 +197,20 @@ func NewNetstackAdapter(dev tun.Device) TunnelDevice {
 
 // ConnectionConfig 包含连接配置选项
 type ConnectionConfig struct {
-	TLSConfig         *tls.Config
-	KeepAlivePeriod   time.Duration
-	InitialPacketSize uint16
-	Endpoint          *net.UDPAddr
-	MTU               int
-	MaxPacketRate     float64 // 每秒最大数据包处理速率
-	MaxBurst          int     // 突发处理数据包的最大数量
-	SelfCheckEnabled  bool
-	SelfCheckDialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
-	ReconnectStrategy BackoffStrategy
-	OnConnected       func()          // Optional callback after MASQUE connection is established.
-	OnDisconnected    func(err error) // Optional callback after an established MASQUE connection is lost.
+	TLSConfig            *tls.Config
+	KeepAlivePeriod      time.Duration
+	InitialPacketSize    uint16
+	Endpoint             *net.UDPAddr
+	EndpointSelector     func() *net.UDPAddr // Optional endpoint selector invoked for each connection attempt.
+	MTU                  int
+	MaxPacketRate        float64 // 每秒最大数据包处理速率
+	MaxBurst             int     // 突发处理数据包的最大数量
+	MaxReconnectAttempts int     // 连续连接失败达到阈值后暂停重连；0表示无限重试
+	SelfCheckEnabled     bool
+	SelfCheckDialFunc    func(ctx context.Context, network, addr string) (net.Conn, error)
+	ReconnectStrategy    BackoffStrategy
+	OnConnected          func()          // Optional callback after MASQUE connection is established.
+	OnDisconnected       func(err error) // Optional callback after an established MASQUE connection is lost.
 }
 
 // BackoffStrategy 定义重连策略接口
@@ -444,10 +446,20 @@ func handleConnection(ctx context.Context, config ConnectionConfig, device Tunne
 		}
 	}()
 
+	endpoint := config.Endpoint
+	if config.EndpointSelector != nil {
+		if selected := config.EndpointSelector(); selected != nil {
+			endpoint = selected
+		}
+	}
+	if endpoint == nil || endpoint.IP == nil {
+		return reconnectAttempt + 1, fmt.Errorf("no endpoint configured for tunnel connection")
+	}
+
 	slog.Info(
 		"establishing MASQUE connection",
 		"endpoint",
-		fmt.Sprintf("%s:%d", config.Endpoint.IP, config.Endpoint.Port),
+		fmt.Sprintf("%s:%d", endpoint.IP, endpoint.Port),
 		"attempt",
 		reconnectAttempt+1,
 	)
@@ -457,7 +469,7 @@ func handleConnection(ctx context.Context, config ConnectionConfig, device Tunne
 		config.TLSConfig,
 		internal.DefaultQuicConfig(config.KeepAlivePeriod, config.InitialPacketSize),
 		internal.ConnectURI,
-		config.Endpoint,
+		endpoint,
 	)
 
 	if err != nil {
@@ -529,6 +541,7 @@ func handleConnection(ctx context.Context, config ConnectionConfig, device Tunne
 func MaintainTunnel(ctx context.Context, config ConnectionConfig, device TunnelDevice) {
 	stats := &TunnelStats{}
 	reconnectAttempt := 0
+	var err error
 	packetBufferPool = NewNetBuffer(config.MTU)
 
 	for {
@@ -539,12 +552,26 @@ func MaintainTunnel(ctx context.Context, config ConnectionConfig, device TunnelD
 		default:
 		}
 
-		reconnectAttempt, err := handleConnection(ctx, config, device, stats, reconnectAttempt)
+		reconnectAttempt, err = handleConnection(ctx, config, device, stats, reconnectAttempt)
 		if ctx.Err() != nil {
 			return
 		}
 
 		if err != nil {
+			if config.MaxReconnectAttempts > 0 && reconnectAttempt >= config.MaxReconnectAttempts {
+				slog.Error(
+					"connection failed repeatedly, retry paused for manual intervention",
+					"error",
+					err,
+					"attempts",
+					reconnectAttempt,
+					"max_reconnect_attempts",
+					config.MaxReconnectAttempts,
+				)
+				<-ctx.Done()
+				return
+			}
+
 			delay := config.ReconnectStrategy.NextDelay(reconnectAttempt)
 			slog.Warn("connection error, retrying", "error", err, "delay", delay)
 

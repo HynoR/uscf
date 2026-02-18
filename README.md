@@ -47,20 +47,9 @@ If you already have a configuration file, run directly:
 ./uscf proxy -c config.json
 ```
 
-### Scan Endpoint (Update Config and Exit)
-
-Use `scan` to find a healthy endpoint and write it into `config.json`, then exit:
-
-```bash
-./uscf scan --ipv4 -c config.json
-./uscf scan --ipv6 -c config.json
-```
-
-Optional:
-
-```bash
-./uscf scan --ipv4 --timeout 3s -c config.json
-```
+Runtime endpoint selection priority:
+- If `custom_endpoints_v4` / `custom_endpoints_v6` has valid entries for current `socks.use_ipv6` family, USCF picks one randomly on each reconnect attempt.
+- If custom list is empty or invalid, USCF falls back to `endpoint_v4` / `endpoint_v6`.
 
 ### WARP+ License Usage
 
@@ -125,11 +114,16 @@ Logging options are configured in `logging`:
 - `level`: `debug`, `info`, `warn`, `error` (default: `info`)
 - `format`: `text`, `json` (default: `text`)
 
+Reconnect guard option:
+- `socks.max_reconnect_attempts`: maximum consecutive reconnect attempts before pausing retries for manual intervention. `0` means unlimited retry (default).
+
 ```json
 {
   "private_key": "BASE64 encoded ECDSA private key(Auto Generate)",
   "endpoint_v4": "(Auto Generate)",
   "endpoint_v6": "(Auto Generate)",
+  "custom_endpoints_v4": [],
+  "custom_endpoints_v6": [],
   "endpoint_pub_key": "PEM encoded ECDSA public key(Auto Generate)",
   "license": "License key(Auto Generate)",
   "id": "Unique device identifier(Auto Generate)",
@@ -156,6 +150,7 @@ Logging options are configured in `logging`:
     "mtu": 1280,
     "initial_packet_size": 1242,
     "reconnect_delay": "1s",
+    "max_reconnect_attempts": 0,
     "connection_timeout": "30s",
     "idle_timeout": "5m",
     "self_check": false
@@ -196,18 +191,6 @@ Available flags:
 - `--jwt string`: Team token (optional)
 - `--license string`: WARP+ license key to bind/update account (optional)
 - `--reset-config`: Reset SOCKS5 configuration to default values
-- `-c, --config string`: Configuration file path (default "config.json")
-
-### scan Command
-
-```bash
-./uscf scan [flags]
-```
-
-Available flags:
-- `--ipv4`: Scan IPv4 endpoint candidates and update `endpoint_v4`
-- `--ipv6`: Scan IPv6 endpoint candidates and update `endpoint_v6`
-- `--timeout duration`: Per-endpoint scan timeout (default "3s")
 - `-c, --config string`: Configuration file path (default "config.json")
 
 ## Connection Example
