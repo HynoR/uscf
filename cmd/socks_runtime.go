@@ -15,6 +15,7 @@ var ErrTunnelDisconnected = errors.New("tunnel disconnected")
 
 type socksRuntime struct {
 	tunnelUp      atomic.Bool
+	allowWhenDown atomic.Bool
 	restartMu     sync.Mutex
 	activeConns   sync.Map
 	server        atomic.Value // *socks5.Server
@@ -40,6 +41,14 @@ func (r *socksRuntime) SetTunnelUp(up bool) {
 
 func (r *socksRuntime) IsTunnelUp() bool {
 	return r.tunnelUp.Load()
+}
+
+func (r *socksRuntime) SetAllowWhenDown(allow bool) {
+	r.allowWhenDown.Store(allow)
+}
+
+func (r *socksRuntime) AllowWhenDown() bool {
+	return r.allowWhenDown.Load()
 }
 
 func (r *socksRuntime) CurrentServer() *socks5.Server {
@@ -68,7 +77,7 @@ func (r *socksRuntime) DialContext(ctx context.Context, network, addr string) (n
 }
 
 func (r *socksRuntime) DropIfDisconnected(conn net.Conn) bool {
-	if r.IsTunnelUp() {
+	if r.IsTunnelUp() || r.AllowWhenDown() {
 		return false
 	}
 

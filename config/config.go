@@ -78,6 +78,7 @@ type SocksConfig struct {
 	Port                 string   `json:"port"`                   // 代理监听的端口
 	Username             string   `json:"username"`               // 代理认证的用户名
 	Password             string   `json:"password"`               // 代理认证的密码
+	BypassDomain         []string `json:"bypass_domain"`          // 命中后直连当前网络，不走MASQUE隧道
 	ConnectPort          int      `json:"connect_port"`           // MASQUE连接使用的端口
 	DNS                  []string `json:"dns"`                    // 在MASQUE隧道内使用的DNS服务器
 	DNSTimeout           Duration `json:"dns_timeout"`            // DNS查询超时时间（超时后尝试下一个服务器）
@@ -159,6 +160,7 @@ func GetDefaultSocksConfig() SocksConfig {
 		Port:                 "1080",
 		Username:             "",
 		Password:             "",
+		BypassDomain:         []string{},
 		ConnectPort:          443,
 		DNS:                  []string{"1.1.1.1", "8.8.8.8"},
 		DNSTimeout:           Duration(2 * time.Second),

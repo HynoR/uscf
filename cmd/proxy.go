@@ -510,6 +510,24 @@ func normalizeDNSServerAddress(dns string) (string, error) {
 	return "", fmt.Errorf("invalid DNS server address %q", dns)
 }
 
+func newLocalDNSResolver() (socks5.NameResolver, error) {
+	dnsTimeout := config.AppConfig.Socks.DNSTimeout.Duration()
+	if len(config.AppConfig.Socks.DNS) > 0 {
+		dnsServer, err := normalizeDNSServerAddress(config.AppConfig.Socks.DNS[0])
+		if err != nil {
+			return nil, fmt.Errorf("Failed to parse local DNS server %s: %v", config.AppConfig.Socks.DNS[0], err)
+		}
+		return api.NewCachingDNSResolver(
+			dnsServer,
+			dnsTimeout,
+		), nil
+	}
+	return api.NewCachingDNSResolver(
+		"8.8.8.8:53",
+		dnsTimeout,
+	), nil
+}
+
 // setupAndRunSocksProxy 设置并运行SOCKS5代理
 func setupAndRunSocksProxy(cmd *cobra.Command) error {
 	slog.Info("preparing SOCKS5 proxy")
@@ -733,13 +751,16 @@ func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint *net.UDPAdd
 
 // prepareSocksRuntime 创建SOCKS运行时，包括解析器、拨号器和可重建的server工厂
 func prepareSocksRuntime(tunNet *netstack.Net, connectionTimeout, idleTimeout time.Duration) (*socksRuntime, error) {
+	bypassMatcher := newBypassDomainMatcher(config.AppConfig.Socks.BypassDomain)
+	if bypassMatcher.Enabled() {
+		slog.Info("bypass domain matcher enabled", "count", len(bypassMatcher.domains))
+	}
+
 	// 根据配置选择DNS解析器
 	var resolver socks5.NameResolver
 	if config.AppConfig.Socks.RemoteDNS {
-		// 使用TunnelDNSResolver，让DNS通过TUN隧道
 		slog.Info("using remote DNS resolver through TUN tunnel")
 
-		// 解析DNS服务器地址
 		var dnsAddrs []netip.Addr
 		for _, dns := range config.AppConfig.Socks.DNS {
 			addr, err := netip.ParseAddr(dns)
@@ -749,27 +770,24 @@ func prepareSocksRuntime(tunNet *netstack.Net, connectionTimeout, idleTimeout ti
 			dnsAddrs = append(dnsAddrs, addr)
 		}
 
-		resolver = api.NewTunnelDNSResolver(tunNet, dnsAddrs, config.AppConfig.Socks.DNSTimeout.Duration())
-	} else {
-		// 使用本地DNS解析器
-		slog.Info("using local DNS resolver")
-		dnsTimeout := config.AppConfig.Socks.DNSTimeout.Duration()
-		if len(config.AppConfig.Socks.DNS) > 0 {
-			dnsServer, err := normalizeDNSServerAddress(config.AppConfig.Socks.DNS[0])
+		tunnelResolver := api.NewTunnelDNSResolver(tunNet, dnsAddrs, config.AppConfig.Socks.DNSTimeout.Duration())
+		if bypassMatcher.Enabled() {
+			localResolver, err := newLocalDNSResolver()
 			if err != nil {
-				return nil, fmt.Errorf("Failed to parse local DNS server %s: %v", config.AppConfig.Socks.DNS[0], err)
+				return nil, err
 			}
-			resolver = api.NewCachingDNSResolver(
-				dnsServer,
-				dnsTimeout,
-			)
+			resolver = newBypassAwareResolver(bypassMatcher, localResolver, tunnelResolver)
+			slog.Info("bypass-aware DNS resolver enabled for remote DNS mode")
 		} else {
-			resolver = api.NewCachingDNSResolver(
-				"8.8.8.8:53",
-				dnsTimeout,
-			)
+			resolver = tunnelResolver
 		}
-
+	} else {
+		slog.Info("using local DNS resolver")
+		localResolver, err := newLocalDNSResolver()
+		if err != nil {
+			return nil, err
+		}
+		resolver = localResolver
 	}
 
 	if config.AppConfig.Socks.BlockUDP443 {
@@ -799,16 +817,47 @@ func prepareSocksRuntime(tunNet *netstack.Net, connectionTimeout, idleTimeout ti
 		}, nil
 	}
 
+	directDial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dialCtx, cancel := context.WithTimeout(ctx, connectionTimeout)
+		defer cancel()
+
+		dialer := &net.Dialer{}
+		conn, err := dialer.DialContext(dialCtx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+
+		return &models.TimeoutConn{
+			Conn:        conn,
+			IdleTimeout: idleTimeout,
+		}, nil
+	}
+
 	// 从配置中获取身份验证设置
 	username := config.AppConfig.Socks.Username
 	password := config.AppConfig.Socks.Password
 
-	return newSocksRuntime(
+	runtime := newSocksRuntime(
 		upstreamDial,
 		func(dialFunc func(ctx context.Context, network, addr string) (net.Conn, error)) *socks5.Server {
-			return createSocksServer(username, password, dialFunc, resolver)
+			dialWithRequest := func(ctx context.Context, network, addr string, request *socks5.Request) (net.Conn, error) {
+				if request != nil && request.RawDestAddr != nil {
+					host := request.RawDestAddr.FQDN
+					if host != "" && bypassMatcher.Match(host) {
+						slog.Debug("bypass domain matched, dialing direct network", "domain", host, "target", addr)
+						return directDial(ctx, network, addr)
+					}
+				}
+
+				return dialFunc(ctx, network, addr)
+			}
+
+			return createSocksServer(username, password, dialFunc, dialWithRequest, resolver)
 		},
-	), nil
+	)
+	runtime.SetAllowWhenDown(bypassMatcher.Enabled())
+
+	return runtime, nil
 }
 
 // runSocksServer 创建并运行SOCKS5服务器
@@ -866,7 +915,12 @@ func runSocksServer(socksRuntime *socksRuntime, idleTimeout time.Duration) error
 }
 
 // createSocksServer 创建SOCKS5服务器
-func createSocksServer(username, password string, dialFunc func(ctx context.Context, network, addr string) (net.Conn, error), resolver socks5.NameResolver) *socks5.Server {
+func createSocksServer(
+	username, password string,
+	dialFunc func(ctx context.Context, network, addr string) (net.Conn, error),
+	dialWithRequest func(ctx context.Context, network, addr string, request *socks5.Request) (net.Conn, error),
+	resolver socks5.NameResolver,
+) *socks5.Server {
 	buf := api.NewNetBuffer(32 * 1024) // 32KB buffer
 	if buf == nil {
 		slog.Error("failed to create buffer pool for SOCKS5")
@@ -879,6 +933,7 @@ func createSocksServer(username, password string, dialFunc func(ctx context.Cont
 		return socks5.NewServer(
 			socks5.WithLogger(logger),
 			socks5.WithDial(dialFunc),
+			socks5.WithDialAndRequest(dialWithRequest),
 			socks5.WithResolver(resolver),
 			socks5.WithBufferPool(buf),
 		)
@@ -887,6 +942,7 @@ func createSocksServer(username, password string, dialFunc func(ctx context.Cont
 		return socks5.NewServer(
 			socks5.WithLogger(logger),
 			socks5.WithDial(dialFunc),
+			socks5.WithDialAndRequest(dialWithRequest),
 			socks5.WithResolver(resolver),
 			socks5.WithAuthMethods([]socks5.Authenticator{
 				socks5.UserPassAuthenticator{

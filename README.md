@@ -117,6 +117,10 @@ Logging options are configured in `logging`:
 Reconnect guard option:
 - `socks.max_reconnect_attempts`: maximum consecutive reconnect attempts before pausing retries for manual intervention. `0` means unlimited retry (default).
 
+Bypass domain option:
+- `socks.bypass_domain`: domain allowlist for direct network egress. Matching rule is exact-or-subdomain (`example.com` matches both `example.com` and `a.example.com`).
+- When a destination domain matches this list, traffic bypasses MASQUE tunnel and uses the current host network directly.
+
 ```json
 {
   "private_key": "BASE64 encoded ECDSA private key(Auto Generate)",
@@ -135,6 +139,7 @@ Reconnect guard option:
     "port": "2333",
     "username": "",
     "password": "",
+    "bypass_domain": [],
     "connect_port": 443,
     "dns": [
       "1.1.1.1",

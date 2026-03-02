@@ -59,6 +59,37 @@ func TestSocksRuntimeDropIfDisconnected(t *testing.T) {
 	}
 }
 
+func TestSocksRuntimeDropIfDisconnectedBypassEnabled(t *testing.T) {
+	runtime := newRuntimeForTest(func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return nil, nil
+	})
+	runtime.SetTunnelUp(false)
+	runtime.SetAllowWhenDown(true)
+
+	client, peer := net.Pipe()
+	defer client.Close()
+	defer peer.Close()
+
+	dropped := runtime.DropIfDisconnected(client)
+	if dropped {
+		t.Fatalf("expected connection not to be dropped when bypass is enabled")
+	}
+
+	_ = client.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	go func() {
+		_, _ = peer.Write([]byte("x"))
+	}()
+
+	buf := make([]byte, 1)
+	n, err := client.Read(buf)
+	if err != nil {
+		t.Fatalf("expected live connection, got read error: %v", err)
+	}
+	if n != 1 || buf[0] != 'x' {
+		t.Fatalf("unexpected read result n=%d buf=%q", n, string(buf[:n]))
+	}
+}
+
 func TestSocksRuntimeRestartAndDrainClosesTrackedConnections(t *testing.T) {
 	runtime := newRuntimeForTest(func(ctx context.Context, network, addr string) (net.Conn, error) {
 		return nil, errors.New("not used")
