@@ -12,7 +12,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	connectip "github.com/Diniboy1123/connect-ip-go"
 	"github.com/HynoR/uscf/internal"
 	"golang.zx2c4.com/wireguard/tun"
 )
@@ -275,132 +274,6 @@ func sleepWithBackoff(ctx context.Context, backoff *time.Duration) bool {
 	}
 }
 
-// handleForwarding 处理数据包的转发
-func handleForwarding(ctx context.Context, device TunnelDevice, ipConn *connectip.Conn, stats *TunnelStats) error {
-	errChan := make(chan error, 2)
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	// 从设备到IP连接的转发
-	go func() {
-		defer cancel()
-		errStreak := 0
-		var backoff time.Duration
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				buf := packetBufferPool.GetBuf()
-
-				n, err := device.ReadPacket(*buf)
-				if err != nil {
-					packetBufferPool.PutBuf(buf)
-					errChan <- fmt.Errorf("failed to read from TUN device: %v", err)
-					return
-				}
-
-				stats.RecordPacketOut(n)
-				icmp, err := ipConn.WritePacket((*buf)[:n])
-				if err != nil {
-					packetBufferPool.PutBuf(buf)
-					if errors.As(err, new(*connectip.CloseError)) {
-						errChan <- fmt.Errorf("connection closed while writing to IP connection: %v", err)
-						return
-					}
-					errStreak++
-					if errStreak >= forwardingErrStreakThreshold {
-						errChan <- fmt.Errorf("too many write errors to IP connection: %w", err)
-						return
-					}
-					if errStreak == 1 {
-						slog.Debug("error writing to IP connection", "error", err, "streak", errStreak)
-					}
-					if !sleepWithBackoff(ctx, &backoff) {
-						return
-					}
-					continue
-				}
-				errStreak = 0
-				backoff = 0
-				// Soft cap: buffers exceeding 2*packetBuffCap are not returned to pool, letting GC reclaim them to prevent pool poisoning
-				if cap(*buf) < 2*packetBuffCap {
-					packetBufferPool.PutBuf(buf)
-				}
-
-				if len(icmp) > 0 {
-					if err := device.WritePacket(icmp); err != nil {
-						if errors.As(err, new(*connectip.CloseError)) {
-							errChan <- fmt.Errorf("failed to write ICMP to TUN device: %v", err)
-							return
-						}
-						slog.Debug("error writing ICMP to TUN device; continuing", "error", err)
-						continue
-					}
-					stats.RecordPacketIn(len(icmp))
-				}
-			}
-		}
-	}()
-
-	// 从IP连接到设备的转发
-	go func() {
-		defer cancel()
-		errStreak := 0
-		var backoff time.Duration
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				buf := packetBufferPool.GetBuf()
-
-				n, err := ipConn.ReadPacket(*buf, true)
-				if err != nil {
-					packetBufferPool.PutBuf(buf)
-					if errors.As(err, new(*connectip.CloseError)) {
-						errChan <- fmt.Errorf("connection closed while reading from IP connection: %v", err)
-						return
-					}
-					errStreak++
-					if errStreak >= forwardingErrStreakThreshold {
-						errChan <- fmt.Errorf("too many read errors from IP connection: %w", err)
-						return
-					}
-					if errStreak == 1 {
-						slog.Debug("error reading from IP connection", "error", err, "streak", errStreak)
-					}
-					if !sleepWithBackoff(ctx, &backoff) {
-						return
-					}
-					continue
-				}
-				errStreak = 0
-				backoff = 0
-
-				stats.RecordPacketIn(n)
-				if err := device.WritePacket((*buf)[:n]); err != nil {
-					packetBufferPool.PutBuf(buf)
-					errChan <- fmt.Errorf("failed to write to TUN device: %v", err)
-					return
-				}
-				// Soft cap: buffers exceeding 2*packetBuffCap are not returned to pool, letting GC reclaim them to prevent pool poisoning
-				if cap(*buf) < 2*packetBuffCap {
-					packetBufferPool.PutBuf(buf)
-				}
-			}
-		}
-	}()
-
-	// 等待错误或上下文取消
-	select {
-	case err := <-errChan:
-		return err
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
 // monitorStats 监控统计信息
 func monitorStats(ctx context.Context, stats *TunnelStats) {
 	ticker := time.NewTicker(300 * time.Second)
@@ -439,6 +312,12 @@ func monitorStats(ctx context.Context, stats *TunnelStats) {
 
 // handleConnection 处理单次连接
 func handleConnection(ctx context.Context, config ConnectionConfig, device TunnelDevice, stats *TunnelStats, reconnectAttempt int) (nextAttempt int, err error) {
+	forwarding := newForwardingSupervisor(ctx, device, stats)
+	defer forwarding.Close()
+	return handleConnectionWithForwarding(ctx, config, forwarding, stats, reconnectAttempt)
+}
+
+func handleConnectionWithForwarding(ctx context.Context, config ConnectionConfig, forwarding *forwardingSupervisor, stats *TunnelStats, reconnectAttempt int) (nextAttempt int, err error) {
 	connected := false
 	defer func() {
 		if connected && config.OnDisconnected != nil {
@@ -507,7 +386,7 @@ func handleConnection(ctx context.Context, config ConnectionConfig, device Tunne
 
 	forwardingErrCh := make(chan error, 1)
 	go func() {
-		forwardingErrCh <- handleForwardingFn(forwardingCtx, device, ipConn, stats)
+		forwardingErrCh <- handleForwardingFn(forwardingCtx, forwarding, ipConn)
 	}()
 
 	var selfCheckErrCh <-chan error
@@ -543,6 +422,8 @@ func MaintainTunnel(ctx context.Context, config ConnectionConfig, device TunnelD
 	reconnectAttempt := 0
 	var err error
 	packetBufferPool = NewNetBuffer(config.MTU)
+	forwarding := newForwardingSupervisor(ctx, device, stats)
+	defer forwarding.Close()
 
 	for {
 		select {
@@ -552,7 +433,7 @@ func MaintainTunnel(ctx context.Context, config ConnectionConfig, device TunnelD
 		default:
 		}
 
-		reconnectAttempt, err = handleConnection(ctx, config, device, stats, reconnectAttempt)
+		reconnectAttempt, err = handleConnectionWithForwarding(ctx, config, forwarding, stats, reconnectAttempt)
 		if ctx.Err() != nil {
 			return
 		}

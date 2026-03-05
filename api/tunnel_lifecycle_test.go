@@ -46,7 +46,7 @@ func TestHandleConnectionOnDisconnectedAfterEstablished(t *testing.T) {
 	}
 
 	forwardErr := errors.New("forwarding failed")
-	handleForwardingFn = func(ctx context.Context, device TunnelDevice, ipConn *connectip.Conn, stats *TunnelStats) error {
+	handleForwardingFn = func(ctx context.Context, forwarding *forwardingSupervisor, ipConn *connectip.Conn) error {
 		return forwardErr
 	}
 
