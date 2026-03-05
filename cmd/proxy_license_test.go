@@ -336,11 +336,12 @@ func TestApplyCustomLicenseUpdatesConfig(t *testing.T) {
 		t.Fatalf("unexpected in-memory license: %q", config.AppConfig.License)
 	}
 
-	content, err := os.ReadFile(configPath)
+	keyPath := filepath.Join(filepath.Dir(configPath), "key.json")
+	content, err := os.ReadFile(keyPath)
 	if err != nil {
-		t.Fatalf("failed to read config file: %v", err)
+		t.Fatalf("failed to read key file: %v", err)
 	}
 	if !strings.Contains(string(content), `"license": "NEW-LICENSE"`) {
-		t.Fatalf("expected updated license in config file, got:\n%s", string(content))
+		t.Fatalf("expected updated license in key file, got:\n%s", string(content))
 	}
 }

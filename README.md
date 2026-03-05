@@ -102,11 +102,17 @@ docker run -d   --name uscf   --network=host   -v  /etc/uscf/:/app/etc/   --log-
 
 ## Configuration File Description
 
-USCF uses a JSON format configuration file. The default configuration file path is `config.json` in the current directory.
+USCF now uses two JSON files in the same directory:
+
+- `config.json`: shared/reusable runtime settings (`socks`, `logging`, `registration`, `custom_endpoints_*`)
+- `key.json`: node-specific Cloudflare/MASQUE identity fields (`private_key`, `endpoint_*`, `id`, `access_token`, etc.)
+
+The default path passed by `-c/--config` is still `config.json`. `key.json` is always resolved in the same directory.
 
 ### Configuration Example
 
-After Automatic Registration, You would get a config.json like the example below, you can edit items and then restart your program to apply them.
+After automatic registration, you will get `config.json` + `key.json` in the same directory.
+You can edit items and restart your program to apply them.
 The Config file is merge from usque's flags and configs, You can find the description of config items from usque.
 
 Time options (`dns_timeout`, `keepalive_period`, `reconnect_delay`, `connection_timeout`, `idle_timeout`) use human-readable strings: unit suffixes are `ns`, `us`/`µs`, `ms`, `s`, `m`, `h` (e.g. `"2s"`, `"5m"`, `"1h30m"`). Legacy configs with numeric nanosecond values are still accepted.
@@ -122,20 +128,12 @@ Bypass domain option:
 - `socks.bypass_domain`: domain allowlist for direct network egress. Matching rule is exact-or-subdomain (`example.com` matches both `example.com` and `a.example.com`).
 - When a destination domain matches this list, traffic bypasses MASQUE tunnel and uses the current host network directly.
 
+`config.json`:
+
 ```json
 {
-  "private_key": "BASE64 encoded ECDSA private key(Auto Generate)",
-  "endpoint_v4": "(Auto Generate)",
-  "endpoint_v6": "(Auto Generate)",
   "custom_endpoints_v4": [],
   "custom_endpoints_v6": [],
-  "endpoint_pub_key": "PEM encoded ECDSA public key(Auto Generate)",
-  "license": "License key(Auto Generate)",
-  "id": "Unique device identifier(Auto Generate)",
-  "access_token": "API access token(Auto Generate)",
-  "account_mode": "free|premium|team",
-  "ipv4": "Assigned IPv4 address(Auto Generate)",
-  "ipv6": "Assigned IPv6 address(Auto Generate)",
   "socks": {
     "bind_address": "0.0.0.0",
     "port": "2333",
@@ -169,6 +167,23 @@ Bypass domain option:
   "registration": {
     "device_name": "Device name"
   }
+}
+```
+
+`key.json`:
+
+```json
+{
+  "private_key": "BASE64 encoded ECDSA private key(Auto Generate)",
+  "endpoint_v4": "(Auto Generate)",
+  "endpoint_v6": "(Auto Generate)",
+  "endpoint_pub_key": "PEM encoded ECDSA public key(Auto Generate)",
+  "account_mode": "free|premium|team",
+  "license": "License key(Auto Generate)",
+  "id": "Unique device identifier(Auto Generate)",
+  "access_token": "API access token(Auto Generate)",
+  "ipv4": "Assigned IPv4 address(Auto Generate)",
+  "ipv6": "Assigned IPv6 address(Auto Generate)"
 }
 ```
 

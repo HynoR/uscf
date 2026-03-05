@@ -27,9 +27,7 @@ var rootCmd = &cobra.Command{
 					slog.Info("config file not found, continuing without preloaded config", "path", configPath)
 					return nil
 				}
-
-				slog.Warn("failed to load config, continuing without preloaded config", "path", configPath, "error", err)
-				return nil
+				return fmt.Errorf("failed to load config %q: %w; delete config and reinitialize", configPath, err)
 			}
 
 			config.AppConfig.Logging = logging.Setup(config.AppConfig.Logging)

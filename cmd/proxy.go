@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -110,6 +111,13 @@ func runProxyCmd(cmd *cobra.Command, args []string) error {
 	customLicense = strings.TrimSpace(customLicense)
 	customJWT, _ := cmd.Flags().GetString("jwt")
 	customJWT = strings.TrimSpace(customJWT)
+	customJWT, jwtFromFile, jwtResolveErr := resolveJWTFromFlagOrFile(configPath, config.ConfigLoaded, config.AppConfig, customLicense, customJWT)
+	if jwtResolveErr != nil {
+		slog.Warn("failed to consume jwt from jwt.txt, continuing startup", "path", jwtFilePathFromConfigPath(configPath), "error", jwtResolveErr)
+	}
+	if jwtFromFile {
+		slog.Info("consumed jwt from jwt.txt", "path", jwtFilePathFromConfigPath(configPath))
+	}
 
 	// 检查是否需要重置SOCKS5配置
 	resetConfig, _ := cmd.Flags().GetBool("reset-config")
@@ -218,6 +226,63 @@ func runProxyCmd(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+func jwtFilePathFromConfigPath(configPath string) string {
+	if strings.TrimSpace(configPath) == "" {
+		configPath = "config.json"
+	}
+	return filepath.Join(filepath.Dir(configPath), "jwt.txt")
+}
+
+func consumeJWTFromSiblingFile(configPath string) (string, error) {
+	jwtPath := jwtFilePathFromConfigPath(configPath)
+
+	raw, err := os.ReadFile(jwtPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil
+		}
+		return "", fmt.Errorf("failed to read jwt file %q: %w", jwtPath, err)
+	}
+
+	token := strings.TrimSpace(string(raw))
+	if token == "" {
+		return "", nil
+	}
+
+	if err := os.WriteFile(jwtPath, []byte(""), 0o600); err != nil {
+		return token, fmt.Errorf("failed to clear jwt file %q: %w", jwtPath, err)
+	}
+
+	return token, nil
+}
+
+func resolveJWTFromFlagOrFile(configPath string, configLoaded bool, cfg config.Config, customLicense, customJWT string) (resolvedJWT string, fromFile bool, warnErr error) {
+	customLicense = strings.TrimSpace(customLicense)
+	customJWT = strings.TrimSpace(customJWT)
+
+	if customJWT != "" || customLicense != "" {
+		return customJWT, false, nil
+	}
+
+	decision, err := decideStartupAction(configLoaded, cfg, customLicense, "")
+	if err != nil {
+		return customJWT, false, err
+	}
+	if decision.EffectiveMode != accountModeFree {
+		return customJWT, false, nil
+	}
+
+	fileJWT, consumeErr := consumeJWTFromSiblingFile(configPath)
+	if fileJWT == "" {
+		return customJWT, false, consumeErr
+	}
+	if consumeErr != nil {
+		return fileJWT, true, consumeErr
+	}
+
+	return fileJWT, true, nil
 }
 
 func decideStartupAction(configLoaded bool, cfg config.Config, customLicense, customJWT string) (startupDecision, error) {

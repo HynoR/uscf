@@ -6,8 +6,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -73,6 +75,35 @@ type Config struct {
 	Logging LoggingConfig `json:"logging"` // 日志输出级别和格式
 }
 
+// KeyConfig 包含与 Cloudflare/MASQUE 身份强绑定的配置，存储于 key.json。
+type KeyConfig struct {
+	PrivateKey     string `json:"private_key"`
+	EndpointV4     string `json:"endpoint_v4"`
+	EndpointV6     string `json:"endpoint_v6"`
+	EndpointPubKey string `json:"endpoint_pub_key"`
+	AccountMode    string `json:"account_mode"`
+	License        string `json:"license"`
+	ID             string `json:"id"`
+	AccessToken    string `json:"access_token"`
+	IPv4           string `json:"ipv4"`
+	IPv6           string `json:"ipv6"`
+}
+
+// PublicConfig 包含可复用的通用运行配置，存储于 config.json。
+type PublicConfig struct {
+	CustomEndpointsV4 []string         `json:"custom_endpoints_v4"`
+	CustomEndpointsV6 []string         `json:"custom_endpoints_v6"`
+	Socks             SocksConfig      `json:"socks"`
+	Registration      RegistrationInfo `json:"registration"`
+	Logging           LoggingConfig    `json:"logging"`
+}
+
+// legacyConfig 兼容读取旧版单文件 config.json（包含 key 字段 + 公共字段）。
+type legacyConfig struct {
+	KeyConfig
+	PublicConfig
+}
+
 // SocksConfig 包含SOCKS5代理相关的配置
 type SocksConfig struct {
 	BindAddress          string   `json:"bind_address"`           // 代理绑定的地址
@@ -124,15 +155,53 @@ var ConfigLoaded bool
 // Returns:
 //   - error: An error if the configuration file cannot be loaded or parsed.
 func LoadConfig(configPath string) error {
+	if strings.TrimSpace(configPath) == "" {
+		configPath = "config.json"
+	}
+
 	file, err := os.Open(configPath)
 	if err != nil {
-		return fmt.Errorf("failed to open config file: %v", err)
+		return fmt.Errorf("failed to open config file: %w", err)
 	}
 	defer file.Close()
 
+	var legacy legacyConfig
 	decoder := json.NewDecoder(file)
-	if err := decoder.Decode(&AppConfig); err != nil {
-		return fmt.Errorf("failed to decode config file: %v", err)
+	if err := decoder.Decode(&legacy); err != nil {
+		return fmt.Errorf("failed to decode config file: %w", err)
+	}
+
+	AppConfig = Config{
+		CustomEndpointsV4: append([]string(nil), legacy.CustomEndpointsV4...),
+		CustomEndpointsV6: append([]string(nil), legacy.CustomEndpointsV6...),
+		Socks:             legacy.Socks,
+		Registration:      legacy.Registration,
+		Logging:           legacy.Logging,
+	}
+	applyKeyConfig(&AppConfig, legacy.KeyConfig)
+
+	keyPath := keyConfigPath(configPath)
+	keyFile, err := os.Open(keyPath)
+	switch {
+	case err == nil:
+		defer keyFile.Close()
+		var keyCfg KeyConfig
+		if err := json.NewDecoder(keyFile).Decode(&keyCfg); err != nil {
+			return fmt.Errorf("failed to decode key file: %w", err)
+		}
+		applyKeyConfig(&AppConfig, keyCfg)
+	case errors.Is(err, os.ErrNotExist):
+		legacyKey := extractKeyConfig(AppConfig)
+		if hasAnyKeyField(legacyKey) {
+			if err := writeJSONFile(keyPath, legacyKey); err != nil {
+				return fmt.Errorf("failed to write key file during migration: %w", err)
+			}
+			if err := writeJSONFile(configPath, extractPublicConfig(AppConfig)); err != nil {
+				return fmt.Errorf("failed to rewrite config file during migration: %w", err)
+			}
+		}
+	default:
+		return fmt.Errorf("failed to open key file: %w", err)
 	}
 
 	// 如果Socks配置为空，设置默认值
@@ -231,16 +300,89 @@ func NormalizeLoggingConfig(cfg LoggingConfig) (LoggingConfig, []string) {
 // Returns:
 //   - error: An error if the configuration file cannot be written.
 func (*Config) SaveConfig(configPath string) error {
-	file, err := os.Create(configPath)
+	if strings.TrimSpace(configPath) == "" {
+		configPath = "config.json"
+	}
+
+	if err := writeJSONFile(configPath, extractPublicConfig(AppConfig)); err != nil {
+		return fmt.Errorf("failed to write config file: %w", err)
+	}
+	if err := writeJSONFile(keyConfigPath(configPath), extractKeyConfig(AppConfig)); err != nil {
+		return fmt.Errorf("failed to write key file: %w", err)
+	}
+
+	return nil
+}
+
+func keyConfigPath(configPath string) string {
+	if strings.TrimSpace(configPath) == "" {
+		configPath = "config.json"
+	}
+	return filepath.Join(filepath.Dir(configPath), "key.json")
+}
+
+func extractKeyConfig(cfg Config) KeyConfig {
+	return KeyConfig{
+		PrivateKey:     cfg.PrivateKey,
+		EndpointV4:     cfg.EndpointV4,
+		EndpointV6:     cfg.EndpointV6,
+		EndpointPubKey: cfg.EndpointPubKey,
+		AccountMode:    cfg.AccountMode,
+		License:        cfg.License,
+		ID:             cfg.ID,
+		AccessToken:    cfg.AccessToken,
+		IPv4:           cfg.IPv4,
+		IPv6:           cfg.IPv6,
+	}
+}
+
+func extractPublicConfig(cfg Config) PublicConfig {
+	return PublicConfig{
+		CustomEndpointsV4: append([]string(nil), cfg.CustomEndpointsV4...),
+		CustomEndpointsV6: append([]string(nil), cfg.CustomEndpointsV6...),
+		Socks:             cfg.Socks,
+		Registration:      cfg.Registration,
+		Logging:           cfg.Logging,
+	}
+}
+
+func applyKeyConfig(cfg *Config, key KeyConfig) {
+	cfg.PrivateKey = key.PrivateKey
+	cfg.EndpointV4 = key.EndpointV4
+	cfg.EndpointV6 = key.EndpointV6
+	cfg.EndpointPubKey = key.EndpointPubKey
+	cfg.AccountMode = key.AccountMode
+	cfg.License = key.License
+	cfg.ID = key.ID
+	cfg.AccessToken = key.AccessToken
+	cfg.IPv4 = key.IPv4
+	cfg.IPv6 = key.IPv6
+}
+
+func hasAnyKeyField(key KeyConfig) bool {
+	return strings.TrimSpace(key.PrivateKey) != "" ||
+		strings.TrimSpace(key.EndpointV4) != "" ||
+		strings.TrimSpace(key.EndpointV6) != "" ||
+		strings.TrimSpace(key.EndpointPubKey) != "" ||
+		strings.TrimSpace(key.AccountMode) != "" ||
+		strings.TrimSpace(key.License) != "" ||
+		strings.TrimSpace(key.ID) != "" ||
+		strings.TrimSpace(key.AccessToken) != "" ||
+		strings.TrimSpace(key.IPv4) != "" ||
+		strings.TrimSpace(key.IPv6) != ""
+}
+
+func writeJSONFile(path string, v interface{}) error {
+	file, err := os.Create(path)
 	if err != nil {
-		return fmt.Errorf("failed to create config file: %v", err)
+		return fmt.Errorf("failed to create file %q: %w", path, err)
 	}
 	defer file.Close()
 
 	encoder := json.NewEncoder(file)
 	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(AppConfig); err != nil {
-		return fmt.Errorf("failed to encode config file: %v", err)
+	if err := encoder.Encode(v); err != nil {
+		return fmt.Errorf("failed to encode json to %q: %w", path, err)
 	}
 
 	return nil

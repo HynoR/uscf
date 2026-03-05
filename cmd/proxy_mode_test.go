@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/HynoR/uscf/config"
@@ -57,6 +59,44 @@ func TestDecideStartupActionMatrix(t *testing.T) {
 		}
 		if decision.EffectiveMode != accountModeTeam {
 			t.Fatalf("unexpected mode: %s", decision.EffectiveMode)
+		}
+	})
+
+	t.Run("valid free without jwt consumes jwt.txt and registers team", func(t *testing.T) {
+		cfg := baseCfg
+		cfg.AccountMode = accountModeFree
+
+		configPath := filepath.Join(t.TempDir(), "config.json")
+		jwtPath := filepath.Join(filepath.Dir(configPath), "jwt.txt")
+		if err := os.WriteFile(jwtPath, []byte("JWT-FILE-1"), 0o600); err != nil {
+			t.Fatalf("failed to write jwt file: %v", err)
+		}
+
+		resolvedJWT, fromFile, err := resolveJWTFromFlagOrFile(configPath, true, cfg, "", "")
+		if err != nil {
+			t.Fatalf("unexpected resolve error: %v", err)
+		}
+		if !fromFile {
+			t.Fatalf("expected jwt from file")
+		}
+
+		decision, err := decideStartupAction(true, cfg, "", resolvedJWT)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if decision.Action != startupRegisterTeam {
+			t.Fatalf("unexpected action: %s", decision.Action)
+		}
+		if decision.EffectiveMode != accountModeTeam {
+			t.Fatalf("unexpected mode: %s", decision.EffectiveMode)
+		}
+
+		info, err := os.Stat(jwtPath)
+		if err != nil {
+			t.Fatalf("failed to stat jwt file: %v", err)
+		}
+		if info.Size() != 0 {
+			t.Fatalf("expected consumed jwt file to be empty, size=%d", info.Size())
 		}
 	})
 
