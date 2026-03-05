@@ -59,6 +59,7 @@ type Config struct {
 	License           string   `json:"license"`             // Application license key
 	ID                string   `json:"id"`                  // Device unique identifier
 	AccessToken       string   `json:"access_token"`        // Authentication token for API access
+	AccountMode       string   `json:"account_mode"`        // Account mode: free/premium/team
 	IPv4              string   `json:"ipv4"`                // Assigned IPv4 address
 	IPv6              string   `json:"ipv6"`                // Assigned IPv6 address
 
@@ -255,6 +256,7 @@ func (*Config) SaveConfig(configPath string) error {
 //   - license: string - Application license key.
 //   - id: string - Device unique identifier.
 //   - accessToken: string - Authentication token for API access.
+//   - accountMode: string - Account mode, one of free/premium/team.
 //   - ipv4: string - Assigned IPv4 address.
 //   - ipv6: string - Assigned IPv6 address.
 //   - deviceName: string - Name of the device (for registration info).
@@ -263,7 +265,7 @@ func (*Config) SaveConfig(configPath string) error {
 //   - The newly initialized Config.
 func InitNewConfig(
 	privateKey, endpointV4, endpointV6, endpointPubKey,
-	license, id, accessToken, ipv4, ipv6, deviceName string,
+	license, id, accessToken, accountMode, ipv4, ipv6, deviceName string,
 ) Config {
 	return Config{
 		PrivateKey:     privateKey,
@@ -273,6 +275,7 @@ func InitNewConfig(
 		License:        license,
 		ID:             id,
 		AccessToken:    accessToken,
+		AccountMode:    accountMode,
 		IPv4:           ipv4,
 		IPv6:           ipv6,
 		Socks:          GetDefaultSocksConfig(),

@@ -11,11 +11,13 @@ import (
 	"math/rand"
 	"net"
 	"net/netip"
+	"os"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/HynoR/uscf/models"
 
@@ -41,6 +43,31 @@ var (
 	enrollKeyFunc       = api.EnrollKey
 	rebindLicenseFunc   = api.RebindLicense
 )
+
+const (
+	accountModeFree    = "free"
+	accountModePremium = "premium"
+	accountModeTeam    = "team"
+	maxDeviceNameLen   = 16
+)
+
+type startupAction string
+
+const (
+	startupUseExisting     startupAction = "use_existing"
+	startupRegisterFree    startupAction = "register_free"
+	startupRegisterPremium startupAction = "register_premium"
+	startupRegisterTeam    startupAction = "register_team"
+)
+
+type startupDecision struct {
+	Action            startupAction
+	EffectiveMode     string
+	ShouldPersistMode bool
+	ModeWasInvalid    bool
+	IgnoredLicense    bool
+	IgnoredJWT        bool
+}
 
 func init() {
 	// 初始化 proxy 命令的参数
@@ -81,17 +108,59 @@ func runProxyCmd(cmd *cobra.Command, args []string) error {
 	}
 	customLicense, _ := cmd.Flags().GetString("license")
 	customLicense = strings.TrimSpace(customLicense)
+	customJWT, _ := cmd.Flags().GetString("jwt")
+	customJWT = strings.TrimSpace(customJWT)
 
 	// 检查是否需要重置SOCKS5配置
 	resetConfig, _ := cmd.Flags().GetBool("reset-config")
-	registeredThisRun := false
+	decision, err := decideStartupAction(config.ConfigLoaded, config.AppConfig, customLicense, customJWT)
+	if err != nil {
+		return err
+	}
+	if decision.ModeWasInvalid {
+		slog.Warn("invalid account_mode in config, falling back to free", "mode", config.AppConfig.AccountMode)
+	}
+	if decision.IgnoredLicense {
+		slog.Info("ignoring --license for existing non-free account mode", "account_mode", decision.EffectiveMode)
+	}
+	if decision.IgnoredJWT {
+		slog.Info("ignoring --jwt for existing non-free account mode", "account_mode", decision.EffectiveMode)
+	}
 
-	// 1. 如有需要，进行自动注册
-	if !config.ConfigLoaded {
-		if err := handleRegistration(cmd, configPath, customLicense); err != nil {
+	switch decision.Action {
+	case startupUseExisting:
+		if config.ConfigLoaded && decision.ShouldPersistMode {
+			config.AppConfig.AccountMode = decision.EffectiveMode
+			if err := config.AppConfig.SaveConfig(configPath); err != nil {
+				slog.Warn("failed to persist inferred account mode", "path", configPath, "error", err)
+			}
+		}
+
+		if resetConfig && config.ConfigLoaded {
+			// 如果已加载配置且指定了reset-config标志，则重置SOCKS5配置
+			slog.Info("resetting SOCKS5 configuration to defaults")
+
+			// 保存当前的SNI地址，因为它取决于内部常量
+			sniAddress := config.AppConfig.Socks.SNIAddress
+
+			// 重置为默认配置
+			config.AppConfig.Socks = config.GetDefaultSocksConfig()
+
+			// 恢复SNI地址
+			config.AppConfig.Socks.SNIAddress = sniAddress
+
+			// 保存更新后的配置
+			if err := config.AppConfig.SaveConfig(configPath); err != nil {
+				slog.Warn("failed to save reset config", "path", configPath, "error", err)
+				return fmt.Errorf("failed to save reset configuration: %w", err)
+			}
+			slog.Info("SOCKS5 configuration reset to defaults", "path", configPath)
+		}
+	case startupRegisterFree, startupRegisterPremium, startupRegisterTeam:
+		registrationMode := decision.EffectiveMode
+		if err := handleRegistration(cmd, configPath, registrationMode, customLicense, customJWT); err != nil {
 			return err
 		}
-		registeredThisRun = true
 
 		// 更新一些需要从内部常量获取的配置值
 		config.AppConfig.Socks.SNIAddress = internal.ConnectSNI
@@ -100,32 +169,8 @@ func runProxyCmd(cmd *cobra.Command, args []string) error {
 		if err := config.AppConfig.SaveConfig(configPath); err != nil {
 			slog.Warn("failed to save updated config", "path", configPath, "error", err)
 		}
-	} else if resetConfig {
-		// 如果已加载配置且指定了reset-config标志，则重置SOCKS5配置
-		slog.Info("resetting SOCKS5 configuration to defaults")
-
-		// 保存当前的SNI地址，因为它取决于内部常量
-		sniAddress := config.AppConfig.Socks.SNIAddress
-
-		// 重置为默认配置
-		config.AppConfig.Socks = config.GetDefaultSocksConfig()
-
-		// 恢复SNI地址
-		config.AppConfig.Socks.SNIAddress = sniAddress
-
-		// 保存更新后的配置
-		if err := config.AppConfig.SaveConfig(configPath); err != nil {
-			slog.Warn("failed to save reset config", "path", configPath, "error", err)
-			return fmt.Errorf("failed to save reset configuration: %w", err)
-		}
-		slog.Info("SOCKS5 configuration reset to defaults", "path", configPath)
-	}
-
-	// 对已有配置场景，允许用户主动更新 license。
-	if config.ConfigLoaded && !registeredThisRun && customLicense != "" {
-		if err := applyCustomLicense(configPath, customLicense); err != nil {
-			return err
-		}
+	default:
+		return fmt.Errorf("unsupported startup action: %s", decision.Action)
 	}
 
 	// 检查并应用命令行参数覆盖配置文件的值
@@ -175,26 +220,233 @@ func runProxyCmd(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func decideStartupAction(configLoaded bool, cfg config.Config, customLicense, customJWT string) (startupDecision, error) {
+	customLicense = strings.TrimSpace(customLicense)
+	customJWT = strings.TrimSpace(customJWT)
+
+	if customLicense != "" && customJWT != "" {
+		return startupDecision{}, fmt.Errorf("cannot use --license and --jwt together")
+	}
+
+	if !configLoaded || !isStartupConfigValid(cfg) {
+		switch {
+		case customLicense != "":
+			return startupDecision{
+				Action:        startupRegisterPremium,
+				EffectiveMode: accountModePremium,
+			}, nil
+		case customJWT != "":
+			return startupDecision{
+				Action:        startupRegisterTeam,
+				EffectiveMode: accountModeTeam,
+			}, nil
+		default:
+			return startupDecision{
+				Action:        startupRegisterFree,
+				EffectiveMode: accountModeFree,
+			}, nil
+		}
+	}
+
+	effectiveMode, shouldPersist, modeWasInvalid := resolveAccountMode(cfg, customLicense)
+	decision := startupDecision{
+		EffectiveMode:     effectiveMode,
+		ShouldPersistMode: shouldPersist,
+		ModeWasInvalid:    modeWasInvalid,
+	}
+
+	switch effectiveMode {
+	case accountModePremium:
+		decision.Action = startupUseExisting
+		decision.IgnoredLicense = customLicense != ""
+		decision.IgnoredJWT = customJWT != ""
+	case accountModeTeam:
+		decision.Action = startupUseExisting
+		decision.IgnoredLicense = customLicense != ""
+		decision.IgnoredJWT = customJWT != ""
+	case accountModeFree:
+		switch {
+		case customLicense != "":
+			decision.Action = startupRegisterPremium
+			decision.EffectiveMode = accountModePremium
+		case customJWT != "":
+			decision.Action = startupRegisterTeam
+			decision.EffectiveMode = accountModeTeam
+		default:
+			decision.Action = startupUseExisting
+		}
+	default:
+		return startupDecision{}, fmt.Errorf("unsupported account mode: %s", effectiveMode)
+	}
+
+	return decision, nil
+}
+
+func isStartupConfigValid(cfg config.Config) bool {
+	return strings.TrimSpace(cfg.ID) != "" && strings.TrimSpace(cfg.AccessToken) != ""
+}
+
+func resolveAccountMode(cfg config.Config, customLicense string) (mode string, shouldPersist bool, modeWasInvalid bool) {
+	raw := strings.TrimSpace(cfg.AccountMode)
+	normalized := strings.ToLower(raw)
+
+	switch normalized {
+	case accountModeFree, accountModePremium, accountModeTeam:
+		if raw != normalized {
+			return normalized, true, false
+		}
+		return normalized, false, false
+	case "":
+		if strings.HasPrefix(strings.TrimSpace(cfg.ID), "t.") {
+			return accountModeTeam, true, false
+		}
+		if customLicense != "" && customLicense == strings.TrimSpace(cfg.License) {
+			return accountModePremium, true, false
+		}
+		return accountModeFree, true, false
+	default:
+		return accountModeFree, true, true
+	}
+}
+
+func normalizeDeviceName(raw string) string {
+	s := strings.TrimSpace(strings.ToLower(raw))
+	var b strings.Builder
+	prevDash := false
+
+	for _, r := range s {
+		switch {
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			b.WriteRune(r)
+			prevDash = false
+		case r == '-' || r == '_' || unicode.IsSpace(r):
+			if !prevDash && b.Len() > 0 {
+				b.WriteByte('-')
+				prevDash = true
+			}
+		default:
+			if !prevDash && b.Len() > 0 {
+				b.WriteByte('-')
+				prevDash = true
+			}
+		}
+	}
+
+	out := strings.Trim(b.String(), "-")
+	if out == "" {
+		out = "node"
+	}
+	if len(out) > maxDeviceNameLen {
+		out = strings.Trim(out[:maxDeviceNameLen], "-")
+		if out == "" {
+			out = "node"
+		}
+	}
+	return out
+}
+
+func accountIDSuffix(accountID string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(strings.TrimSpace(accountID)) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(r)
+		}
+	}
+	cleaned := b.String()
+	if cleaned == "" {
+		cleaned = "0000"
+	}
+	if len(cleaned) > 4 {
+		cleaned = cleaned[len(cleaned)-4:]
+	}
+	return cleaned
+}
+
+func buildAutoDeviceName(mode, hostname, accountID string) string {
+	prefix := "p"
+	if mode == accountModeTeam {
+		prefix = "t"
+	}
+
+	host := normalizeDeviceName(hostname)
+	id4 := accountIDSuffix(accountID)
+
+	maxHostLen := maxDeviceNameLen - len(prefix) - 1 - 1 - len(id4)
+	if maxHostLen < 1 {
+		maxHostLen = 1
+	}
+	if len(host) > maxHostLen {
+		host = strings.Trim(host[:maxHostLen], "-")
+		if host == "" {
+			host = "n"
+		}
+	}
+
+	return normalizeDeviceName(fmt.Sprintf("%s-%s-%s", prefix, host, id4))
+}
+
+func resolveRegistrationDeviceName(mode, explicitName, accountID string) string {
+	if mode != accountModePremium && mode != accountModeTeam {
+		return explicitName
+	}
+
+	explicit := strings.TrimSpace(explicitName)
+	if explicit != "" {
+		return normalizeDeviceName(explicit)
+	}
+
+	hostname, err := os.Hostname()
+	if err != nil || strings.TrimSpace(hostname) == "" {
+		hostname = "node"
+	}
+	return buildAutoDeviceName(mode, hostname, accountID)
+}
+
 // handleRegistration 处理自动注册流程
-func handleRegistration(cmd *cobra.Command, configPath, customLicense string) error {
-	slog.Info("config not loaded, starting automatic registration")
+func handleRegistration(cmd *cobra.Command, configPath, accountMode, customLicense, customJWT string) error {
+	slog.Info("starting registration flow", "account_mode", accountMode)
 
 	// 获取注册参数
-	deviceName, _ := cmd.Flags().GetString("name")
+	explicitDeviceName, _ := cmd.Flags().GetString("name")
 	locale, _ := cmd.Flags().GetString("locale")
 	model, _ := cmd.Flags().GetString("model")
 	acceptTos, _ := cmd.Flags().GetBool("accept-tos")
-	jwt, _ := cmd.Flags().GetString("jwt")
 
 	slog.Info("registering account", "locale", locale, "model", model)
 
+	registerJWT := ""
+	switch accountMode {
+	case accountModeFree, accountModePremium:
+		registerJWT = ""
+	case accountModeTeam:
+		registerJWT = customJWT
+		if registerJWT == "" {
+			return fmt.Errorf("Failed to register: jwt is required for team mode")
+		}
+	default:
+		return fmt.Errorf("Failed to register: unsupported account mode %q", accountMode)
+	}
+
 	// 注册账户
-	accountData, err := registerAccountFunc(model, locale, jwt, acceptTos)
+	accountData, err := registerAccountFunc(model, locale, registerJWT, acceptTos)
 	if err != nil {
 		return fmt.Errorf("Failed to register: %v", err)
 	}
 
-	if customLicense != "" {
+	deviceName := resolveRegistrationDeviceName(accountMode, explicitDeviceName, accountData.ID)
+	if accountMode == accountModePremium || accountMode == accountModeTeam {
+		if strings.TrimSpace(explicitDeviceName) == "" {
+			slog.Info("auto-generated device name for registration", "device_name", deviceName)
+		} else if deviceName != explicitDeviceName {
+			slog.Warn("provided --name normalized/truncated for registration", "original", explicitDeviceName, "normalized", deviceName)
+		}
+	}
+
+	if accountMode == accountModePremium {
+		if customLicense == "" {
+			return fmt.Errorf("Failed to apply license: license is required for premium mode")
+		}
+
 		slog.Info("fetching remote account license")
 		finalAccount, changed, apiErr, err := rebindLicenseFunc(accountData, customLicense)
 		if err != nil {
@@ -254,6 +506,7 @@ func handleRegistration(cmd *cobra.Command, configPath, customLicense string) er
 		pickAccountLicense(updatedAccountData, accountData, customLicense),
 		updatedAccountData.ID,
 		accountData.Token,
+		accountMode,
 		updatedAccountData.Config.Interface.Addresses.V4,
 		updatedAccountData.Config.Interface.Addresses.V6,
 		deviceName,

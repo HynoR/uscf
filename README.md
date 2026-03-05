@@ -51,33 +51,34 @@ Runtime endpoint selection priority:
 - If `custom_endpoints_v4` / `custom_endpoints_v6` has valid entries for current `socks.use_ipv6` family, USCF picks one randomly on each reconnect attempt.
 - If custom list is empty or invalid, USCF falls back to `endpoint_v4` / `endpoint_v6`.
 
-### WARP+ License Usage
+### Account Modes (`account_mode`)
 
-Use the `--license` flag to bind/update your own WARP+ license on Cloudflare account.
-USCF now follows wgcf-style remote-state flow:
+USCF uses `account_mode` in `config.json` as the startup source of truth:
 
-1. `GET /reg/{deviceId}/account` to read current remote license
-2. If different, `PUT /reg/{deviceId}/account` with `{"license":"..."}`
-3. `GET /reg/{deviceId}/account` again and persist final remote license to `config.json`
+- `free`: trial account mode
+- `premium`: personal premium mode
+- `team`: team premium mode
 
-#### First registration (no `config.json` / config not loaded)
-```bash
-./uscf proxy -c config.json --license <YOUR_WARP_PLUS_LICENSE>
-```
-This runs registration and then performs the remote license rebind flow above. If binding fails, command exits with error.
+#### Startup rules
+- If config is valid (`id` + `access_token` present), USCF reuses it directly.
+- If config is invalid/missing, USCF registers a new account:
+  - `--license` => register `premium`
+  - `--jwt` => register `team`
+  - no flag => register `free`
 
-#### Later update (config already exists)
-```bash
-./uscf proxy -c config.json --license <NEW_OR_EXISTING_LICENSE>
-```
-This performs the same remote-state-driven flow before proxy startup, then writes final remote license back to `config.json`.
+#### Existing premium/team behavior
+- If config is valid and `account_mode` is `premium` or `team`, USCF ignores `--license` and `--jwt`.
+- No Cloudflare registration/license update API is sent in this case.
+- When registration is required for `premium`/`team` and `--name` is not provided, USCF auto-generates a short device name:
+  - format: `<m>-<host>-<id4>` (`m` is `p` or `t`)
+  - `id4` is derived from account id suffix to reduce collisions when many VMs share the same hostname
+  - final name is normalized and capped at 16 characters
+- If `--name` is provided, it has priority, and is normalized/capped to 16 characters before registration.
 
-#### Trigger behavior
-- `--license` provided: tries to sync license to Cloudflare account.
-- `--license` not provided: no license update request is sent.
-- If remote license already equals target, no `PUT` update is sent.
-
-Note: editing `config.json` `license` alone does not send update to Cloudflare. Use `--license` to trigger remote update.
+#### Version switching policy
+- Switching versions must go through `free` first.
+- To switch from premium/team, first set `account_mode` to `free`, then run with `--license` or `--jwt` to register the new mode.
+- If you stay in `premium`/`team`, repeated startup with flags will not re-register.
 
 #### Important notes
 - License bind success does not always mean immediate `warp=plus` behavior; Cloudflare side may still present `warp=on` for affected accounts.
@@ -132,6 +133,7 @@ Bypass domain option:
   "license": "License key(Auto Generate)",
   "id": "Unique device identifier(Auto Generate)",
   "access_token": "API access token(Auto Generate)",
+  "account_mode": "free|premium|team",
   "ipv4": "Assigned IPv4 address(Auto Generate)",
   "ipv6": "Assigned IPv6 address(Auto Generate)",
   "socks": {
@@ -193,8 +195,8 @@ Available flags:
 - `--model string`: Device model used during registration (defaults to automatic detection based on the system)
 - `--name string`: Device name used during registration
 - `--accept-tos`: Automatically accept Cloudflare Terms of Service (default true)
-- `--jwt string`: Team token (optional)
-- `--license string`: WARP+ license key to bind/update account (optional)
+- `--jwt string`: Team token; used when registration is required (optional)
+- `--license string`: Personal premium license; used when registration is required (optional)
 - `--reset-config`: Reset SOCKS5 configuration to default values
 - `-c, --config string`: Configuration file path (default "config.json")
 
