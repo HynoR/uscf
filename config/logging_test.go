@@ -49,7 +49,8 @@ func TestLoadConfig_UsesProvidedLoggingConfig(t *testing.T) {
 	content := `{
   "logging": {
     "level": "debug",
-    "format": "json"
+    "format": "json",
+    "socks_verbose": true
   }
 }`
 	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
@@ -65,6 +66,9 @@ func TestLoadConfig_UsesProvidedLoggingConfig(t *testing.T) {
 	}
 	if AppConfig.Logging.Format != "json" {
 		t.Fatalf("AppConfig.Logging.Format = %q, want %q", AppConfig.Logging.Format, "json")
+	}
+	if !AppConfig.Logging.SocksVerbose {
+		t.Fatalf("AppConfig.Logging.SocksVerbose = %v, want true", AppConfig.Logging.SocksVerbose)
 	}
 }
 

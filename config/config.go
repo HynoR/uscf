@@ -132,8 +132,9 @@ type SocksConfig struct {
 
 // LoggingConfig 包含日志相关的配置
 type LoggingConfig struct {
-	Level  string `json:"level"`  // 日志级别: debug/info/warn/error
-	Format string `json:"format"` // 日志格式: text/json
+	Level        string `json:"level"`         // 日志级别: debug/info/warn/error
+	Format       string `json:"format"`        // 日志格式: text/json
+	SocksVerbose bool   `json:"socks_verbose"` // 是否启用SOCKS连接级详细日志
 }
 
 // RegistrationInfo 包含注册相关的信息
@@ -254,8 +255,9 @@ func GetDefaultSocksConfig() SocksConfig {
 // GetDefaultLoggingConfig 返回默认日志配置
 func GetDefaultLoggingConfig() LoggingConfig {
 	return LoggingConfig{
-		Level:  "info",
-		Format: "text",
+		Level:        "info",
+		Format:       "text",
+		SocksVerbose: false,
 	}
 }
 

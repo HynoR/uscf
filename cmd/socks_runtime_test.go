@@ -59,34 +59,26 @@ func TestSocksRuntimeDropIfDisconnected(t *testing.T) {
 	}
 }
 
-func TestSocksRuntimeDropIfDisconnectedBypassEnabled(t *testing.T) {
+func TestSocksRuntimeDropIfDisconnectedIsStrictEvenWithVerboseLogging(t *testing.T) {
 	runtime := newRuntimeForTest(func(ctx context.Context, network, addr string) (net.Conn, error) {
 		return nil, nil
 	})
 	runtime.SetTunnelUp(false)
-	runtime.SetAllowWhenDown(true)
+	runtime.SetVerboseLogging(true)
 
 	client, peer := net.Pipe()
-	defer client.Close()
 	defer peer.Close()
 
 	dropped := runtime.DropIfDisconnected(client)
-	if dropped {
-		t.Fatalf("expected connection not to be dropped when bypass is enabled")
+	if !dropped {
+		t.Fatalf("expected connection to be dropped when tunnel is down")
 	}
 
-	_ = client.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
-	go func() {
-		_, _ = peer.Write([]byte("x"))
-	}()
-
+	_ = peer.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
 	buf := make([]byte, 1)
-	n, err := client.Read(buf)
-	if err != nil {
-		t.Fatalf("expected live connection, got read error: %v", err)
-	}
-	if n != 1 || buf[0] != 'x' {
-		t.Fatalf("unexpected read result n=%d buf=%q", n, string(buf[:n]))
+	_, err := peer.Read(buf)
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("expected peer EOF after strict drop, got: %v", err)
 	}
 }
 

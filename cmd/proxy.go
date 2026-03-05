@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -1015,6 +1016,7 @@ func createTunDevice(localAddresses, dnsAddrs []netip.Addr, cmd *cobra.Command) 
 func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint *net.UDPAddr, endpointSelector func() *net.UDPAddr, tunDev tun.Device, tunNet *netstack.Net, socksRuntime *socksRuntime) <-chan struct{} {
 	readyCh := make(chan struct{})
 	var readyOnce sync.Once
+	writeTunnelStateSafe(tunnelStateDown)
 
 	// 从配置文件读取隧道参数
 	keepalivePeriod := config.AppConfig.Socks.KeepalivePeriod.Duration()
@@ -1044,11 +1046,13 @@ func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint *net.UDPAdd
 			if socksRuntime != nil {
 				socksRuntime.SetTunnelUp(true)
 			}
+			writeTunnelStateSafe(tunnelStateUp)
 			readyOnce.Do(func() {
 				close(readyCh)
 			})
 		},
 		OnDisconnected: func(err error) {
+			writeTunnelStateSafe(tunnelStateDown)
 			if socksRuntime == nil {
 				return
 			}
@@ -1173,7 +1177,10 @@ func prepareSocksRuntime(tunNet *netstack.Net, connectionTimeout, idleTimeout ti
 			return createSocksServer(username, password, dialFunc, dialWithRequest, resolver)
 		},
 	)
-	runtime.SetAllowWhenDown(bypassMatcher.Enabled())
+	runtime.SetVerboseLogging(config.AppConfig.Logging.SocksVerbose)
+	if config.AppConfig.Logging.SocksVerbose {
+		slog.Info("SOCKS verbose logging enabled")
+	}
 
 	return runtime, nil
 }
@@ -1200,14 +1207,27 @@ func runSocksServer(socksRuntime *socksRuntime, idleTimeout time.Duration) error
 		return fmt.Errorf("Failed to start SOCKS proxy: %v", err)
 	}
 
+	var connSeq atomic.Uint64
+
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			slog.Warn("failed to accept connection", "error", err)
 			continue
 		}
+		connID := connSeq.Add(1)
+		if socksRuntime.VerboseLoggingEnabled() {
+			remote := "<unknown>"
+			if addr := conn.RemoteAddr(); addr != nil {
+				remote = addr.String()
+			}
+			slog.Debug("accepted SOCKS connection", "conn_id", connID, "remote", remote)
+		}
 
 		if socksRuntime.DropIfDisconnected(conn) {
+			if socksRuntime.VerboseLoggingEnabled() {
+				slog.Warn("SOCKS connection dropped immediately due to tunnel down", "conn_id", connID)
+			}
 			continue
 		}
 
@@ -1218,17 +1238,23 @@ func runSocksServer(socksRuntime *socksRuntime, idleTimeout time.Duration) error
 		trackedConn := socksRuntime.TrackConn(timeoutConn)
 		server := socksRuntime.CurrentServer()
 		if server == nil {
-			slog.Warn("failed to serve SOCKS connection: server unavailable")
+			slog.Warn("failed to serve SOCKS connection: server unavailable", "conn_id", connID)
 			_ = trackedConn.Close()
 			continue
 		}
 
-		go func(server *socks5.Server, conn net.Conn) {
+		go func(server *socks5.Server, conn net.Conn, id uint64) {
 			if err := server.ServeConn(conn); err != nil && !errors.Is(err, net.ErrClosed) {
-				slog.Debug("failed to serve SOCKS connection", "error", err)
+				if socksRuntime.VerboseLoggingEnabled() {
+					slog.Warn("failed to serve SOCKS connection", "conn_id", id, "error", err)
+				} else {
+					slog.Debug("failed to serve SOCKS connection", "error", err)
+				}
+			} else if socksRuntime.VerboseLoggingEnabled() {
+				slog.Debug("SOCKS connection closed", "conn_id", id)
 			}
 			_ = conn.Close()
-		}(server, trackedConn)
+		}(server, trackedConn, connID)
 	}
 }
 

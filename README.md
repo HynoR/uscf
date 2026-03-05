@@ -120,6 +120,7 @@ Time options (`dns_timeout`, `keepalive_period`, `reconnect_delay`, `connection_
 Logging options are configured in `logging`:
 - `level`: `debug`, `info`, `warn`, `error` (default: `info`)
 - `format`: `text`, `json` (default: `text`)
+- `socks_verbose`: whether to emit SOCKS connection-level diagnostics (default: `false`)
 
 Reconnect guard option:
 - `socks.max_reconnect_attempts`: maximum consecutive reconnect attempts before pausing retries for manual intervention. `0` means unlimited retry (default).
@@ -162,7 +163,8 @@ Bypass domain option:
   },
   "logging": {
     "level": "info",
-    "format": "text"
+    "format": "text",
+    "socks_verbose": false
   },
   "registration": {
     "device_name": "Device name"

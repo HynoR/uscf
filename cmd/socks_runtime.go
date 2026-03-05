@@ -7,6 +7,7 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/things-go/go-socks5"
 )
@@ -14,13 +15,13 @@ import (
 var ErrTunnelDisconnected = errors.New("tunnel disconnected")
 
 type socksRuntime struct {
-	tunnelUp      atomic.Bool
-	allowWhenDown atomic.Bool
-	restartMu     sync.Mutex
-	activeConns   sync.Map
-	server        atomic.Value // *socks5.Server
-	serverFactory func(dialFunc func(ctx context.Context, network, addr string) (net.Conn, error)) *socks5.Server
-	upstreamDial  func(ctx context.Context, network, addr string) (net.Conn, error)
+	tunnelUp       atomic.Bool
+	verboseLogging atomic.Bool
+	restartMu      sync.Mutex
+	activeConns    sync.Map
+	server         atomic.Value // *socks5.Server
+	serverFactory  func(dialFunc func(ctx context.Context, network, addr string) (net.Conn, error)) *socks5.Server
+	upstreamDial   func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
 func newSocksRuntime(
@@ -43,12 +44,12 @@ func (r *socksRuntime) IsTunnelUp() bool {
 	return r.tunnelUp.Load()
 }
 
-func (r *socksRuntime) SetAllowWhenDown(allow bool) {
-	r.allowWhenDown.Store(allow)
+func (r *socksRuntime) SetVerboseLogging(enabled bool) {
+	r.verboseLogging.Store(enabled)
 }
 
-func (r *socksRuntime) AllowWhenDown() bool {
-	return r.allowWhenDown.Load()
+func (r *socksRuntime) VerboseLoggingEnabled() bool {
+	return r.verboseLogging.Load()
 }
 
 func (r *socksRuntime) CurrentServer() *socks5.Server {
@@ -62,22 +63,34 @@ func (r *socksRuntime) CurrentServer() *socks5.Server {
 
 func (r *socksRuntime) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	if !r.IsTunnelUp() {
+		if r.VerboseLoggingEnabled() {
+			slog.Warn("SOCKS dial rejected: tunnel down", "network", network, "target", addr)
+		}
 		return nil, ErrTunnelDisconnected
 	}
 
 	conn, err := r.upstreamDial(ctx, network, addr)
 	if err != nil {
 		if !r.IsTunnelUp() {
+			if r.VerboseLoggingEnabled() {
+				slog.Warn("SOCKS dial failed after tunnel down", "network", network, "target", addr, "error", err)
+			}
 			return nil, ErrTunnelDisconnected
+		}
+		if r.VerboseLoggingEnabled() {
+			slog.Warn("SOCKS upstream dial failed", "network", network, "target", addr, "error", err)
 		}
 		return nil, err
 	}
 
+	if r.VerboseLoggingEnabled() {
+		slog.Debug("SOCKS upstream dial succeeded", "network", network, "target", addr)
+	}
 	return conn, nil
 }
 
 func (r *socksRuntime) DropIfDisconnected(conn net.Conn) bool {
-	if r.IsTunnelUp() || r.AllowWhenDown() {
+	if r.IsTunnelUp() {
 		return false
 	}
 
@@ -85,7 +98,11 @@ func (r *socksRuntime) DropIfDisconnected(conn net.Conn) bool {
 	if addr := conn.RemoteAddr(); addr != nil {
 		remote = addr.String()
 	}
-	slog.Debug("new connection dropped while tunnel disconnected", "remote", remote)
+	if r.VerboseLoggingEnabled() {
+		slog.Warn("new SOCKS connection rejected while tunnel down", "remote", remote)
+	} else {
+		slog.Debug("new connection dropped while tunnel disconnected", "remote", remote)
+	}
 	_ = conn.Close()
 	return true
 }
@@ -104,12 +121,21 @@ func (r *socksRuntime) TrackConn(conn net.Conn) net.Conn {
 func (r *socksRuntime) RestartAndDrain(reason error) {
 	r.restartMu.Lock()
 	defer r.restartMu.Unlock()
+	start := time.Now()
 
 	slog.Warn("restarting SOCKS runtime after tunnel down", "reason", reason)
 	r.server.Store(r.serverFactory(r.DialContext))
 
 	drained := r.drainActiveConnections()
-	slog.Info("active SOCKS connections drained", "count", drained, "reason", reason)
+	slog.Info(
+		"active SOCKS connections drained",
+		"count",
+		drained,
+		"reason",
+		reason,
+		"duration",
+		time.Since(start),
+	)
 }
 
 func (r *socksRuntime) drainActiveConnections() int {
