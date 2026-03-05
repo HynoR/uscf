@@ -215,6 +215,7 @@ Available flags:
 - `--jwt string`: Team token; used when registration is required (optional)
 - `--license string`: Personal premium license; used when registration is required (optional)
 - `--reset-config`: Reset SOCKS5 configuration to default values
+- `--use-ipv6`: Override `socks.use_ipv6` in config file for current startup
 - `-c, --config string`: Configuration file path (default "config.json")
 
 ## Connection Example

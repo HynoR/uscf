@@ -90,6 +90,7 @@ func init() {
 	proxyCmd.Flags().StringP("port", "p", "", "Port for SOCKS5 proxy (overrides config file)")
 	proxyCmd.Flags().StringP("username", "u", "", "Username for SOCKS5 proxy authentication (overrides config file)")
 	proxyCmd.Flags().StringP("password", "w", "", "Password for SOCKS5 proxy authentication (overrides config file)")
+	proxyCmd.Flags().Bool("use-ipv6", false, "Use IPv6 for MASQUE connection (overrides config file)")
 
 	// 添加提示，说明SOCKS配置已移至配置文件，但可通过命令行参数覆盖
 	proxyCmd.Long += "\n\nNote: All SOCKS proxy settings are primarily managed through the config file, but can be overridden with command-line flags."
@@ -183,35 +184,7 @@ func runProxyCmd(cmd *cobra.Command, args []string) error {
 	}
 
 	// 检查并应用命令行参数覆盖配置文件的值
-	configChanged := false
-
-	// 检查绑定地址
-	if bindAddress, _ := cmd.Flags().GetString("bind-address"); bindAddress != "" {
-		slog.Info("overriding bind address from command line", "bind_address", bindAddress)
-		config.AppConfig.Socks.BindAddress = bindAddress
-		configChanged = true
-	}
-
-	// 检查端口
-	if port, _ := cmd.Flags().GetString("port"); port != "" {
-		slog.Info("overriding port from command line", "port", port)
-		config.AppConfig.Socks.Port = port
-		configChanged = true
-	}
-
-	// 检查用户名
-	if username, _ := cmd.Flags().GetString("username"); username != "" {
-		slog.Info("overriding username from command line")
-		config.AppConfig.Socks.Username = username
-		configChanged = true
-	}
-
-	// 检查密码
-	if password, _ := cmd.Flags().GetString("password"); password != "" {
-		slog.Info("overriding password from command line")
-		config.AppConfig.Socks.Password = password
-		configChanged = true
-	}
+	configChanged := applySocksFlagOverrides(cmd, &config.AppConfig)
 
 	// 如果配置有变更，保存到配置文件
 	if configChanged {
@@ -227,6 +200,43 @@ func runProxyCmd(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+func applySocksFlagOverrides(cmd *cobra.Command, cfg *config.Config) bool {
+	configChanged := false
+
+	if bindAddress, _ := cmd.Flags().GetString("bind-address"); bindAddress != "" {
+		slog.Info("overriding bind address from command line", "bind_address", bindAddress)
+		cfg.Socks.BindAddress = bindAddress
+		configChanged = true
+	}
+
+	if port, _ := cmd.Flags().GetString("port"); port != "" {
+		slog.Info("overriding port from command line", "port", port)
+		cfg.Socks.Port = port
+		configChanged = true
+	}
+
+	if username, _ := cmd.Flags().GetString("username"); username != "" {
+		slog.Info("overriding username from command line")
+		cfg.Socks.Username = username
+		configChanged = true
+	}
+
+	if password, _ := cmd.Flags().GetString("password"); password != "" {
+		slog.Info("overriding password from command line")
+		cfg.Socks.Password = password
+		configChanged = true
+	}
+
+	if cmd.Flags().Changed("use-ipv6") {
+		useIPv6, _ := cmd.Flags().GetBool("use-ipv6")
+		slog.Info("overriding use_ipv6 from command line", "use_ipv6", useIPv6)
+		cfg.Socks.UseIPv6 = useIPv6
+		configChanged = true
+	}
+
+	return configChanged
 }
 
 func jwtFilePathFromConfigPath(configPath string) string {
