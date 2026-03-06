@@ -111,6 +111,7 @@ type SocksConfig struct {
 	Username             string   `json:"username"`               // 代理认证的用户名
 	Password             string   `json:"password"`               // 代理认证的密码
 	BypassDomain         []string `json:"bypass_domain"`          // 命中后直连当前网络，不走MASQUE隧道
+	ProxyTCPPort         []int    `json:"proxy_tcp_port"`         // 仅这些TCP目标端口走MASQUE隧道，其余直连
 	ConnectPort          int      `json:"connect_port"`           // MASQUE连接使用的端口
 	DNS                  []string `json:"dns"`                    // 在MASQUE隧道内使用的DNS服务器
 	DNSTimeout           Duration `json:"dns_timeout"`            // DNS查询超时时间（超时后尝试下一个服务器）
@@ -210,6 +211,10 @@ func LoadConfig(configPath string) error {
 	if AppConfig.Socks.Port == "" && AppConfig.Socks.BindAddress == "" && len(AppConfig.Socks.DNS) == 0 {
 		AppConfig.Socks = GetDefaultSocksConfig()
 	}
+	AppConfig.Socks, err = NormalizeSocksConfig(AppConfig.Socks)
+	if err != nil {
+		return err
+	}
 
 	defaultLogging := GetDefaultLoggingConfig()
 	if strings.TrimSpace(AppConfig.Logging.Level) == "" {
@@ -232,6 +237,7 @@ func GetDefaultSocksConfig() SocksConfig {
 		Username:             "",
 		Password:             "",
 		BypassDomain:         []string{},
+		ProxyTCPPort:         []int{},
 		ConnectPort:          443,
 		DNS:                  []string{"1.1.1.1", "8.8.8.8"},
 		DNSTimeout:           Duration(2 * time.Second),
@@ -294,6 +300,44 @@ func NormalizeLoggingConfig(cfg LoggingConfig) (LoggingConfig, []string) {
 	return normalized, issues
 }
 
+// NormalizeSocksConfig normalizes SOCKS settings and rejects invalid values.
+func NormalizeSocksConfig(cfg SocksConfig) (SocksConfig, error) {
+	normalized := cfg
+	proxyTCPPorts, err := normalizeProxyTCPPorts(cfg.ProxyTCPPort)
+	if err != nil {
+		return SocksConfig{}, err
+	}
+	normalized.ProxyTCPPort = proxyTCPPorts
+	if normalized.BypassDomain == nil {
+		normalized.BypassDomain = []string{}
+	}
+	if normalized.ProxyTCPPort == nil {
+		normalized.ProxyTCPPort = []int{}
+	}
+	return normalized, nil
+}
+
+func normalizeProxyTCPPorts(ports []int) ([]int, error) {
+	if len(ports) == 0 {
+		return []int{}, nil
+	}
+
+	normalized := make([]int, 0, len(ports))
+	seen := make(map[int]struct{}, len(ports))
+	for _, port := range ports {
+		if port < 1 || port > 65535 {
+			return nil, fmt.Errorf("invalid proxy_tcp_port %d: must be between 1 and 65535", port)
+		}
+		if _, ok := seen[port]; ok {
+			continue
+		}
+		seen[port] = struct{}{}
+		normalized = append(normalized, port)
+	}
+
+	return normalized, nil
+}
+
 // SaveConfig writes the current application configuration to a prettified JSON file.
 //
 // Parameters:
@@ -306,10 +350,17 @@ func (*Config) SaveConfig(configPath string) error {
 		configPath = "config.json"
 	}
 
-	if err := writeJSONFile(configPath, extractPublicConfig(AppConfig)); err != nil {
+	normalized := AppConfig
+	var err error
+	normalized.Socks, err = NormalizeSocksConfig(normalized.Socks)
+	if err != nil {
+		return err
+	}
+
+	if err := writeJSONFile(configPath, extractPublicConfig(normalized)); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
-	if err := writeJSONFile(keyConfigPath(configPath), extractKeyConfig(AppConfig)); err != nil {
+	if err := writeJSONFile(keyConfigPath(configPath), extractKeyConfig(normalized)); err != nil {
 		return fmt.Errorf("failed to write key file: %w", err)
 	}
 

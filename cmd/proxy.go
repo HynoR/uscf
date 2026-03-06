@@ -1083,8 +1083,17 @@ func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint *net.UDPAdd
 
 // prepareSocksRuntime 创建SOCKS运行时，包括解析器、拨号器和可重建的server工厂
 func prepareSocksRuntime(tunNet *netstack.Net, connectionTimeout, idleTimeout time.Duration) (*socksRuntime, error) {
-	bypassMatcher := newBypassDomainMatcher(config.AppConfig.Socks.BypassDomain)
-	if bypassMatcher.Enabled() {
+	routePolicy, err := newRoutePolicy(config.AppConfig.Socks.BypassDomain, config.AppConfig.Socks.ProxyTCPPort)
+	if err != nil {
+		return nil, err
+	}
+	bypassMatcher := routePolicy.bypassMatcher
+	if routePolicy.ProxyTCPPortsEnabled() {
+		slog.Info("proxy_tcp_port routing enabled", "count", len(routePolicy.proxyTCPPortList))
+		if bypassMatcher.Enabled() {
+			slog.Info("bypass_domain ignored for TCP routing because proxy_tcp_port is enabled")
+		}
+	} else if bypassMatcher.Enabled() {
 		slog.Info("bypass domain matcher enabled", "count", len(bypassMatcher.domains))
 	}
 
@@ -1173,12 +1182,10 @@ func prepareSocksRuntime(tunNet *netstack.Net, connectionTimeout, idleTimeout ti
 		upstreamDial,
 		func(dialFunc func(ctx context.Context, network, addr string) (net.Conn, error)) *socks5.Server {
 			dialWithRequest := func(ctx context.Context, network, addr string, request *socks5.Request) (net.Conn, error) {
-				if request != nil && request.RawDestAddr != nil {
-					host := request.RawDestAddr.FQDN
-					if host != "" && bypassMatcher.Match(host) {
-						slog.Debug("bypass domain matched, dialing direct network", "domain", host, "target", addr)
-						return directDial(ctx, network, addr)
-					}
+				if !selectTCPRoute(routePolicy, network, addr, request) {
+					host, port, _ := extractRequestTarget(addr, request)
+					slog.Debug("route policy selected direct network", "network", network, "host", host, "port", port, "target", addr)
+					return directDial(ctx, network, addr)
 				}
 
 				return dialFunc(ctx, network, addr)

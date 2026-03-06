@@ -12,10 +12,14 @@ import (
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "usque",
+	Use:   "uscf",
 	Short: "Usque Warp CLI",
 	Long:  "An unofficial Cloudflare Warp CLI that uses the MASQUE protocol and exposes the tunnel as various different services.",
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		if shouldSkipConfigLoad(cmd) {
+			return nil
+		}
+
 		configPath, err := cmd.Flags().GetString("config")
 		if err != nil {
 			return fmt.Errorf("failed to get config path: %w", err)
@@ -39,6 +43,15 @@ var rootCmd = &cobra.Command{
 
 func Execute() error {
 	return rootCmd.Execute()
+}
+
+func shouldSkipConfigLoad(cmd *cobra.Command) bool {
+	for current := cmd; current != nil; current = current.Parent() {
+		if current.Name() == "wg" {
+			return true
+		}
+	}
+	return false
 }
 
 func init() {
