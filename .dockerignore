@@ -1,0 +1,13 @@
+.git
+.github
+.DS_Store
+.idea
+.worktrees
+worktrees
+bin
+artifacts
+docs/plans
+config.json
+key.json
+wgcf
+*_test.go

@@ -1,51 +1,250 @@
-name: Build and Publish Release Docker image
+name: Build Docker Images
+
 on:
   push:
+    branches:
+      - dev
     tags:
       - '[0-9]*.[0-9]*'
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Dockerfile'
+      - 'Dockerfile.wg-socks'
+      - 'entrypoint.sh'
+      - 'healthcheck.sh'
+      - 'entrypoint-wg-socks.sh'
+      - 'healthcheck-wg-socks.sh'
+      - '.dockerignore'
+      - '.github/workflows/docker-image.yml'
+  pull_request:
+    branches:
+      - dev
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Dockerfile'
+      - 'Dockerfile.wg-socks'
+      - 'entrypoint.sh'
+      - 'healthcheck.sh'
+      - 'entrypoint-wg-socks.sh'
+      - 'healthcheck-wg-socks.sh'
+      - '.dockerignore'
+      - '.github/workflows/docker-image.yml'
+  workflow_dispatch:
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  DOCKER_METADATA_SHORT_SHA_LENGTH: 7
+
 jobs:
-  build-and-push:
-    runs-on: ubuntu-latest
+  build:
+    name: Build ${{ matrix.variant }} (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: regular
+            dockerfile: Dockerfile
+            runner: ubuntu-latest
+            platform: linux/amd64
+            platform_slug: linux-amd64
+          - variant: regular
+            dockerfile: Dockerfile
+            runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            platform_slug: linux-arm64
+          - variant: wg
+            dockerfile: Dockerfile.wg-socks
+            runner: ubuntu-latest
+            platform: linux/amd64
+            platform_slug: linux-amd64
+          - variant: wg
+            dockerfile: Dockerfile.wg-socks
+            runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            platform_slug: linux-arm64
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Extract tag name
-        id: tag
-        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+
+      - name: Compute build metadata
+        id: vars
+        shell: bash
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            version="${{ github.ref_name }}"
+          else
+            version="dev-${GITHUB_SHA::7}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "commit=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
       - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/dev')
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build image for validation
+        if: github.event_name == 'pull_request' || !(startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/dev')
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platform }}
+          push: false
+          labels: |
+            org.opencontainers.image.created=${{ steps.vars.outputs.date }}
+            org.opencontainers.image.description=A 3rd-Party Application Based on Usque Which Provide A Proxy to Connect To Cloudflare Warp Through MASQUE Protocol
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.revision=${{ steps.vars.outputs.commit }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.title=uscf
+            org.opencontainers.image.url=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.vars.outputs.version }}
+          build-args: |
+            VERSION=${{ steps.vars.outputs.version }}
+            COMMIT=${{ steps.vars.outputs.commit }}
+            BUILD_DATE=${{ steps.vars.outputs.date }}
+          cache-from: type=gha,scope=${{ github.workflow }}-${{ matrix.variant }}-${{ matrix.platform_slug }}
+          cache-to: type=gha,scope=${{ github.workflow }}-${{ matrix.variant }}-${{ matrix.platform_slug }},mode=max
+
+      - name: Build and push by digest
+        if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/dev')
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          labels: |
+            org.opencontainers.image.created=${{ steps.vars.outputs.date }}
+            org.opencontainers.image.description=A 3rd-Party Application Based on Usque Which Provide A Proxy to Connect To Cloudflare Warp Through MASQUE Protocol
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.revision=${{ steps.vars.outputs.commit }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.title=uscf
+            org.opencontainers.image.url=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.vars.outputs.version }}
+          build-args: |
+            VERSION=${{ steps.vars.outputs.version }}
+            COMMIT=${{ steps.vars.outputs.commit }}
+            BUILD_DATE=${{ steps.vars.outputs.date }}
+          cache-from: type=gha,scope=${{ github.workflow }}-${{ matrix.variant }}-${{ matrix.platform_slug }}
+          cache-to: type=gha,scope=${{ github.workflow }}-${{ matrix.variant }}-${{ matrix.platform_slug }},mode=max
+
+      - name: Export digest
+        if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/dev')
+        shell: bash
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/dev')
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.variant }}-${{ matrix.platform_slug }}
+          path: /tmp/digests/*
+          retention-days: 1
+
+  merge:
+    name: Publish manifests
+    if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/dev')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - regular
+          - wg
+
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-${{ matrix.variant }}-*
+          merge-multiple: true
+
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest
-            type=raw,value=${{ steps.tag.outputs.VERSION }}
-      - name: Update version in Go code
-        run: |
-          sed -i "s/version = \"dev\"/version = \"${{ steps.tag.outputs.VERSION }}\"/g" cmd/version.go
-      - name: Build and push
-        uses: docker/build-push-action@v5
+            type=raw,value=latest,enable=${{ matrix.variant == 'regular' && startsWith(github.ref, 'refs/tags/') }}
+            type=raw,value=${{ github.ref_name }},enable=${{ matrix.variant == 'regular' && startsWith(github.ref, 'refs/tags/') }}
+            type=raw,value=dev,enable=${{ matrix.variant == 'regular' && github.ref == 'refs/heads/dev' }}
+            type=raw,value=dev-{{sha}},enable=${{ matrix.variant == 'regular' && github.ref == 'refs/heads/dev' }}
+            type=raw,value=wg-latest,enable=${{ matrix.variant == 'wg' && startsWith(github.ref, 'refs/tags/') }}
+            type=raw,value=wg-${{ github.ref_name }},enable=${{ matrix.variant == 'wg' && startsWith(github.ref, 'refs/tags/') }}
+            type=raw,value=wg-dev,enable=${{ matrix.variant == 'wg' && github.ref == 'refs/heads/dev' }}
+            type=raw,value=wg-dev-{{sha}},enable=${{ matrix.variant == 'wg' && github.ref == 'refs/heads/dev' }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
         with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            VERSION=${{ steps.tag.outputs.VERSION }}
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create manifest list
+        working-directory: /tmp/digests
+        shell: bash
+        run: |
+          mapfile -t tags < <(printf '%s\n' "${{ steps.meta.outputs.tags }}" | sed '/^$/d')
+          if [ "${#tags[@]}" -eq 0 ]; then
+            echo "No tags to publish for ref ${GITHUB_REF}"
+            exit 0
+          fi
+
+          mapfile -t digests < <(find . -maxdepth 1 -type f -printf '%f\n' | sort)
+          if [ "${#digests[@]}" -eq 0 ]; then
+            echo "No digests found for variant ${{ matrix.variant }}" >&2
+            exit 1
+          fi
+
+          tag_args=()
+          for tag in "${tags[@]}"; do
+            tag_args+=("-t" "$tag")
+          done
+
+          refs=()
+          for digest in "${digests[@]}"; do
+            refs+=("${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:${digest}")
+          done
+
+          docker buildx imagetools create "${tag_args[@]}" "${refs[@]}"
+
+      - name: Inspect published manifests
+        shell: bash
+        run: |
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            docker buildx imagetools inspect "$tag"
+          done <<< "${{ steps.meta.outputs.tags }}"
