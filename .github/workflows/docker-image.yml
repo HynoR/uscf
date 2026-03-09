@@ -37,7 +37,6 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
   DOCKER_METADATA_SHORT_SHA_LENGTH: 7
 
 jobs:
@@ -75,6 +74,14 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Normalize image reference
+        id: image
+        shell: bash
+        run: |
+          image_ref="${{ env.REGISTRY }}/${GITHUB_REPOSITORY,,}"
+          echo "ref=$image_ref" >> "$GITHUB_OUTPUT"
+          echo "Using image ref: $image_ref"
 
       - name: Compute build metadata
         id: vars
@@ -132,7 +139,7 @@ jobs:
           context: .
           file: ${{ matrix.dockerfile }}
           platforms: ${{ matrix.platform }}
-          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ steps.image.outputs.ref }},push-by-digest=true,name-canonical=true,push=true
           labels: |
             org.opencontainers.image.created=${{ steps.vars.outputs.date }}
             org.opencontainers.image.description=A 3rd-Party Application Based on Usque Which Provide A Proxy to Connect To Cloudflare Warp Through MASQUE Protocol
@@ -181,6 +188,14 @@ jobs:
           - wg
 
     steps:
+      - name: Normalize image reference
+        id: image
+        shell: bash
+        run: |
+          image_ref="${{ env.REGISTRY }}/${GITHUB_REPOSITORY,,}"
+          echo "ref=$image_ref" >> "$GITHUB_OUTPUT"
+          echo "Using image ref: $image_ref"
+
       - name: Download digests
         uses: actions/download-artifact@v4
         with:
@@ -192,7 +207,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ steps.image.outputs.ref }}
           tags: |
             type=raw,value=latest,enable=${{ matrix.variant == 'regular' && startsWith(github.ref, 'refs/tags/') }}
             type=raw,value=${{ github.ref_name }},enable=${{ matrix.variant == 'regular' && startsWith(github.ref, 'refs/tags/') }}
@@ -236,7 +251,7 @@ jobs:
 
           refs=()
           for digest in "${digests[@]}"; do
-            refs+=("${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:${digest}")
+            refs+=("${{ steps.image.outputs.ref }}@sha256:${digest}")
           done
 
           docker buildx imagetools create "${tag_args[@]}" "${refs[@]}"
