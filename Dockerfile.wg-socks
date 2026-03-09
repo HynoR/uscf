@@ -32,7 +32,7 @@ FROM alpine:3.21
 WORKDIR /app
 
 RUN mkdir -p /app/etc && \
-    apk add --no-cache bash ca-certificates curl jq iproute2 iptables openresolv wireguard-tools
+    apk add --no-cache bash ca-certificates curl jq iproute2 iptables wireguard-tools
 
 COPY --from=builder /app/uscf /bin/uscf
 COPY entrypoint-wg-socks.sh /app/entrypoint-wg-socks.sh

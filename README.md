@@ -142,7 +142,10 @@ docker run -d   --name uscf   --network=host   -v  /etc/uscf/:/app/etc/   --log-
 
 ### RUN WireGuard SOCKS Image
 
-This variant always brings up `/app/etc/wgcf.conf` with `wg-quick`, then starts `uscf socks -c /app/etc/config.json -b 0.0.0.0`.
+This variant always derives its WireGuard runtime config from `/app/etc/wgcf.conf`, brings that runtime copy up with `wg-quick`, and then starts `uscf socks -c /app/etc/config.json -b 0.0.0.0`.
+
+For container mode, the image keeps the persisted `/app/etc/wgcf.conf` unchanged but creates a runtime-only sanitized copy before calling `wg-quick up`. Any `DNS = ...` line in `wgcf.conf` is ignored in this image, so the container does not try to rewrite `/etc/resolv.conf`.
+The runtime copy also injects `PostUp` / `PostDown` route-guard rules so replies to Docker port-mapped SOCKS connections can still leave through the container's original main route after WireGuard becomes the default route.
 
 #### First deployment with auto bootstrap
 
@@ -202,8 +205,13 @@ Expected existing-deployment layout:
 
 Behavior differences from the normal image:
 - Normal image runs `uscf proxy` and uses MASQUE/TUN.
-- WireGuard SOCKS image runs `wg-quick up /app/etc/wgcf.conf` and then `uscf socks`.
+- WireGuard SOCKS image sanitizes `/app/etc/wgcf.conf` into a runtime copy, runs `wg-quick up` on that copy, and then starts `uscf socks`.
 - In `socks` mode, tunnel-specific settings such as MASQUE identity, `bypass_domain`, `proxy_tcp_port`, `block_udp_443`, and remote/custom DNS options are ignored.
+- `wgcf.conf` may still contain `DNS = ...` for generic WireGuard compatibility, but this special image strips those lines from the runtime copy before `wg-quick up`, so container DNS is left untouched.
+- This image uses `uscf + wg-quick`; it does not embed `wgcf + microsocks`, and it does not support the old `HOST` / `PORT` / `USER` / `PASSWORD` environment-variable interface.
+- Re-registration or custom profile regeneration is done explicitly with `uscf wg register` / `uscf wg generate`, not by entrypoint environment variables.
+- Connectivity recovery is handled by Docker `HEALTHCHECK` and your orchestrator restart policy; the entrypoint does not run an internal `curl` retry loop.
+- The built-in route guard requires a detectable pre-WireGuard IPv4 default route and source IPv4 address. If the container is IPv6-only or has unusual routing that hides them, startup will fail before `wg-quick up`.
 - Startup state rules are strict:
   - all three of `config.json`, `wg-account.json`, `wgcf.conf` missing => bootstrap
   - `config.json` + `wgcf.conf` present => start existing deployment
