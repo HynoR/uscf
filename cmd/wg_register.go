@@ -14,6 +14,7 @@ import (
 
 var (
 	wgRegisterDeviceFunc = api.RegisterWireGuardDevice
+	wgRebindLicenseFunc  = api.RebindLicense
 	wgSetDeviceNameFunc  = api.SetWireGuardDeviceName
 	wgSaveAccountFunc    = func(path string, account config.WGAccount) error { return account.Save(path) }
 )
@@ -29,6 +30,8 @@ func newWGRegisterCmd() *cobra.Command {
 	cmd.Flags().String("name", "", "Device name displayed in the 1.1.1.1 app")
 	cmd.Flags().String("model", internal.DefaultModel, "Device model displayed in the 1.1.1.1 app")
 	cmd.Flags().String("key", "", "Existing base64 WireGuard private key (defaults to random)")
+	cmd.Flags().String("license", "", "WARP+ license key for premium WireGuard registration")
+	cmd.Flags().String("jwt", "", "Team token for WireGuard team registration")
 	cmd.Flags().Bool("accept-tos", false, "Accept Cloudflare's Terms of Service non-interactively")
 
 	return cmd
@@ -39,7 +42,15 @@ func runWGRegisterCmd(cmd *cobra.Command, args []string) error {
 	deviceName, _ := cmd.Flags().GetString("name")
 	model, _ := cmd.Flags().GetString("model")
 	keyValue, _ := cmd.Flags().GetString("key")
+	licenseValue, _ := cmd.Flags().GetString("license")
+	jwtValue, _ := cmd.Flags().GetString("jwt")
 	acceptTOS, _ := cmd.Flags().GetBool("accept-tos")
+
+	licenseValue = strings.TrimSpace(licenseValue)
+	jwtValue = strings.TrimSpace(jwtValue)
+	if licenseValue != "" && jwtValue != "" {
+		return fmt.Errorf("cannot use --license and --jwt together")
+	}
 
 	if err := ensureWGAcceptedTOS(acceptTOS); err != nil {
 		return err
@@ -50,9 +61,19 @@ func runWGRegisterCmd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	accountData, err := wgRegisterDeviceFunc(privateKey.Public().String(), model)
+	accountData, err := wgRegisterDeviceFunc(privateKey.Public().String(), model, jwtValue)
 	if err != nil {
 		return fmt.Errorf("register wireguard device: %w", err)
+	}
+	if licenseValue != "" {
+		finalAccount, _, apiErr, err := wgRebindLicenseFunc(accountData, licenseValue)
+		if err != nil {
+			if apiErr != nil {
+				return fmt.Errorf("rebind wireguard license: %w (API errors: %s)", err, apiErr.ErrorsAsString("; "))
+			}
+			return fmt.Errorf("rebind wireguard license: %w", err)
+		}
+		accountData.Account = finalAccount
 	}
 
 	account := buildWGAccount(accountData, privateKey.String(), deviceName, model)

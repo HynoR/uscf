@@ -22,6 +22,9 @@ func TestRegisterWireGuardDeviceRequest(t *testing.T) {
 		if req.Method != http.MethodPost {
 			t.Fatalf("unexpected method: got %s, want POST", req.Method)
 		}
+		if got := req.Header.Get("CF-Access-Jwt-Assertion"); got != "" {
+			t.Fatalf("unexpected team jwt header: %q", got)
+		}
 
 		payload, err := io.ReadAll(req.Body)
 		if err != nil {
@@ -48,7 +51,37 @@ func TestRegisterWireGuardDeviceRequest(t *testing.T) {
 		return makeResponse(http.StatusOK, `{"id":"device-1","token":"token-1","account":{"license":"license-1"}}`), nil
 	})
 
-	account, err := RegisterWireGuardDevice(publicKey, "PC")
+	account, err := RegisterWireGuardDevice(publicKey, "PC", "")
+	if err != nil {
+		t.Fatalf("RegisterWireGuardDevice() error = %v", err)
+	}
+	if account.ID != "device-1" || account.Token != "token-1" {
+		t.Fatalf("unexpected account: %#v", account)
+	}
+}
+
+func TestRegisterWireGuardDeviceRequestWithJWT(t *testing.T) {
+	const (
+		publicKey = "wg-public-key"
+		jwt       = "team-jwt-1"
+	)
+
+	setupCloudflareTestClient(t, func(req *http.Request) (*http.Response, error) {
+		expectedPath := fmt.Sprintf("/%s/reg", internal.ApiVersion)
+		if req.URL.Path != expectedPath {
+			t.Fatalf("unexpected path: got %s, want %s", req.URL.Path, expectedPath)
+		}
+		if req.Method != http.MethodPost {
+			t.Fatalf("unexpected method: got %s, want POST", req.Method)
+		}
+		if got := req.Header.Get("CF-Access-Jwt-Assertion"); got != jwt {
+			t.Fatalf("unexpected team jwt header: %q", got)
+		}
+
+		return makeResponse(http.StatusOK, `{"id":"device-1","token":"token-1","account":{"license":"license-1"}}`), nil
+	})
+
+	account, err := RegisterWireGuardDevice(publicKey, "PC", jwt)
 	if err != nil {
 		t.Fatalf("RegisterWireGuardDevice() error = %v", err)
 	}

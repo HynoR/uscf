@@ -18,6 +18,8 @@ func newWGRegisterCmdForTest() *cobra.Command {
 	cmd.Flags().String("name", "", "")
 	cmd.Flags().String("model", "PC", "")
 	cmd.Flags().String("key", "", "")
+	cmd.Flags().String("license", "", "")
+	cmd.Flags().String("jwt", "", "")
 	cmd.Flags().Bool("accept-tos", false, "")
 	return cmd
 }
@@ -26,6 +28,13 @@ func newWGGenerateCmdForTest() *cobra.Command {
 	cmd := &cobra.Command{}
 	cmd.Flags().String("wg-account", "wg-account.json", "")
 	cmd.Flags().String("profile", "wg-profile.conf", "")
+	return cmd
+}
+
+func newWGUpdateCmdForTest() *cobra.Command {
+	cmd := &cobra.Command{}
+	cmd.Flags().String("wg-account", "wg-account.json", "")
+	cmd.Flags().String("license", "", "")
 	return cmd
 }
 
@@ -45,8 +54,11 @@ func TestRunWGRegisterCmdSavesAccountAndUsesDerivedPublicKey(t *testing.T) {
 	}
 
 	var gotPublicKey string
-	wgRegisterDeviceFunc = func(publicKey, model string) (models.AccountData, error) {
+	wgRegisterDeviceFunc = func(publicKey, model, jwt string) (models.AccountData, error) {
 		gotPublicKey = publicKey
+		if jwt != "" {
+			t.Fatalf("expected empty jwt for free register, got %q", jwt)
+		}
 		return models.AccountData{
 			ID:    "device-1",
 			Token: "token-1",
@@ -127,7 +139,10 @@ func TestRunWGRegisterCmdReturnsErrorWhenSetDeviceNameFails(t *testing.T) {
 		t.Fatalf("NewPrivateKey() error = %v", err)
 	}
 
-	wgRegisterDeviceFunc = func(publicKey, model string) (models.AccountData, error) {
+	wgRegisterDeviceFunc = func(publicKey, model, jwt string) (models.AccountData, error) {
+		if jwt != "" {
+			t.Fatalf("expected empty jwt for free register, got %q", jwt)
+		}
 		return models.AccountData{
 			ID:    "device-1",
 			Token: "token-1",
@@ -167,6 +182,162 @@ func TestRunWGRegisterCmdReturnsErrorWhenSetDeviceNameFails(t *testing.T) {
 	}
 	if savedAccount.DeviceID != "device-1" || savedAccount.AccessToken != "token-1" || savedAccount.PrivateKey != privateKey.String() {
 		t.Fatalf("saved account = %#v", savedAccount)
+	}
+}
+
+func TestRunWGRegisterCmdRebindsLicenseBeforeSave(t *testing.T) {
+	oldRegister := wgRegisterDeviceFunc
+	oldRebind := wgRebindLicenseFunc
+	oldSetName := wgSetDeviceNameFunc
+	oldSave := wgSaveAccountFunc
+	t.Cleanup(func() {
+		wgRegisterDeviceFunc = oldRegister
+		wgRebindLicenseFunc = oldRebind
+		wgSetDeviceNameFunc = oldSetName
+		wgSaveAccountFunc = oldSave
+	})
+
+	privateKey, err := wireguard.NewPrivateKey()
+	if err != nil {
+		t.Fatalf("NewPrivateKey() error = %v", err)
+	}
+
+	wgRegisterDeviceFunc = func(publicKey, model, jwt string) (models.AccountData, error) {
+		if jwt != "" {
+			t.Fatalf("expected empty jwt for premium register, got %q", jwt)
+		}
+		return models.AccountData{
+			ID:    "device-1",
+			Token: "token-1",
+			Account: models.Account{
+				License: "old-license",
+			},
+		}, nil
+	}
+
+	var gotRebind struct {
+		deviceID string
+		token    string
+		license  string
+	}
+	wgRebindLicenseFunc = func(accountData models.AccountData, target string) (models.Account, bool, *models.APIError, error) {
+		gotRebind.deviceID = accountData.ID
+		gotRebind.token = accountData.Token
+		gotRebind.license = target
+		return models.Account{License: "premium-license"}, true, nil, nil
+	}
+	wgSetDeviceNameFunc = func(deviceID, accessToken, deviceName string) error { return nil }
+
+	var savedAccount config.WGAccount
+	wgSaveAccountFunc = func(path string, account config.WGAccount) error {
+		savedAccount = account
+		return nil
+	}
+
+	cmd := newWGRegisterCmdForTest()
+	if err := cmd.Flags().Set("key", privateKey.String()); err != nil {
+		t.Fatalf("set key flag: %v", err)
+	}
+	if err := cmd.Flags().Set("license", "premium-license"); err != nil {
+		t.Fatalf("set license flag: %v", err)
+	}
+	if err := cmd.Flags().Set("accept-tos", "true"); err != nil {
+		t.Fatalf("set accept-tos flag: %v", err)
+	}
+
+	if err := runWGRegisterCmd(cmd, nil); err != nil {
+		t.Fatalf("runWGRegisterCmd() error = %v", err)
+	}
+
+	if gotRebind.deviceID != "device-1" || gotRebind.token != "token-1" || gotRebind.license != "premium-license" {
+		t.Fatalf("unexpected rebind args: %#v", gotRebind)
+	}
+	if savedAccount.License != "premium-license" {
+		t.Fatalf("saved license = %q, want premium-license", savedAccount.License)
+	}
+}
+
+func TestRunWGRegisterCmdPassesJWTForTeamRegister(t *testing.T) {
+	oldRegister := wgRegisterDeviceFunc
+	oldRebind := wgRebindLicenseFunc
+	oldSetName := wgSetDeviceNameFunc
+	oldSave := wgSaveAccountFunc
+	t.Cleanup(func() {
+		wgRegisterDeviceFunc = oldRegister
+		wgRebindLicenseFunc = oldRebind
+		wgSetDeviceNameFunc = oldSetName
+		wgSaveAccountFunc = oldSave
+	})
+
+	privateKey, err := wireguard.NewPrivateKey()
+	if err != nil {
+		t.Fatalf("NewPrivateKey() error = %v", err)
+	}
+
+	var gotJWT string
+	wgRegisterDeviceFunc = func(publicKey, model, jwt string) (models.AccountData, error) {
+		gotJWT = jwt
+		return models.AccountData{
+			ID:    "team-device-1",
+			Token: "team-token-1",
+			Account: models.Account{
+				License: "team-license",
+			},
+		}, nil
+	}
+	wgRebindLicenseFunc = func(accountData models.AccountData, target string) (models.Account, bool, *models.APIError, error) {
+		t.Fatalf("wgRebindLicenseFunc should not be called for team register")
+		return models.Account{}, false, nil, nil
+	}
+	wgSetDeviceNameFunc = func(deviceID, accessToken, deviceName string) error { return nil }
+
+	var savedAccount config.WGAccount
+	wgSaveAccountFunc = func(path string, account config.WGAccount) error {
+		savedAccount = account
+		return nil
+	}
+
+	cmd := newWGRegisterCmdForTest()
+	if err := cmd.Flags().Set("key", privateKey.String()); err != nil {
+		t.Fatalf("set key flag: %v", err)
+	}
+	if err := cmd.Flags().Set("jwt", "team-jwt-1"); err != nil {
+		t.Fatalf("set jwt flag: %v", err)
+	}
+	if err := cmd.Flags().Set("accept-tos", "true"); err != nil {
+		t.Fatalf("set accept-tos flag: %v", err)
+	}
+
+	if err := runWGRegisterCmd(cmd, nil); err != nil {
+		t.Fatalf("runWGRegisterCmd() error = %v", err)
+	}
+
+	if gotJWT != "team-jwt-1" {
+		t.Fatalf("register jwt = %q, want %q", gotJWT, "team-jwt-1")
+	}
+	if savedAccount.DeviceID != "team-device-1" || savedAccount.AccessToken != "team-token-1" {
+		t.Fatalf("saved account = %#v", savedAccount)
+	}
+}
+
+func TestRunWGRegisterCmdRejectsLicenseAndJWTTogether(t *testing.T) {
+	cmd := newWGRegisterCmdForTest()
+	if err := cmd.Flags().Set("license", "license-1"); err != nil {
+		t.Fatalf("set license flag: %v", err)
+	}
+	if err := cmd.Flags().Set("jwt", "jwt-1"); err != nil {
+		t.Fatalf("set jwt flag: %v", err)
+	}
+	if err := cmd.Flags().Set("accept-tos", "true"); err != nil {
+		t.Fatalf("set accept-tos flag: %v", err)
+	}
+
+	err := runWGRegisterCmd(cmd, nil)
+	if err == nil {
+		t.Fatalf("expected error when license and jwt are both set")
+	}
+	if !strings.Contains(err.Error(), "cannot use --license and --jwt together") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -392,14 +563,90 @@ func TestRunWGGenerateCmdCombinesHostAndPortList(t *testing.T) {
 	}
 }
 
+func TestRunWGUpdateCmdRebindsExistingAccountAndPersistsLicense(t *testing.T) {
+	oldLoad := wgLoadAccountFunc
+	oldRebind := wgRebindLicenseFunc
+	oldSave := wgSaveAccountFunc
+	t.Cleanup(func() {
+		wgLoadAccountFunc = oldLoad
+		wgRebindLicenseFunc = oldRebind
+		wgSaveAccountFunc = oldSave
+	})
+
+	privateKey, err := wireguard.NewPrivateKey()
+	if err != nil {
+		t.Fatalf("NewPrivateKey() error = %v", err)
+	}
+
+	wgLoadAccountFunc = func(path string) (config.WGAccount, error) {
+		return config.WGAccount{
+			DeviceID:    "device-1",
+			AccessToken: "token-1",
+			License:     "old-license",
+			PrivateKey:  privateKey.String(),
+			DeviceName:  "edge-node",
+			Model:       "PC",
+		}, nil
+	}
+
+	var gotRebind struct {
+		deviceID string
+		token    string
+		license  string
+	}
+	wgRebindLicenseFunc = func(accountData models.AccountData, target string) (models.Account, bool, *models.APIError, error) {
+		gotRebind.deviceID = accountData.ID
+		gotRebind.token = accountData.Token
+		gotRebind.license = target
+		return models.Account{License: "new-license"}, true, nil, nil
+	}
+
+	var savedAccount config.WGAccount
+	wgSaveAccountFunc = func(path string, account config.WGAccount) error {
+		savedAccount = account
+		return nil
+	}
+
+	cmd := newWGUpdateCmdForTest()
+	if err := cmd.Flags().Set("license", "new-license"); err != nil {
+		t.Fatalf("set license flag: %v", err)
+	}
+
+	if err := runWGUpdateCmd(cmd, nil); err != nil {
+		t.Fatalf("runWGUpdateCmd() error = %v", err)
+	}
+
+	if gotRebind.deviceID != "device-1" || gotRebind.token != "token-1" || gotRebind.license != "new-license" {
+		t.Fatalf("unexpected rebind args: %#v", gotRebind)
+	}
+	if savedAccount.License != "new-license" || savedAccount.PrivateKey != privateKey.String() || savedAccount.DeviceName != "edge-node" {
+		t.Fatalf("saved account = %#v", savedAccount)
+	}
+}
+
+func TestRunWGUpdateCmdRequiresLicense(t *testing.T) {
+	err := runWGUpdateCmd(newWGUpdateCmdForTest(), nil)
+	if err == nil {
+		t.Fatalf("expected error for missing license")
+	}
+	if !strings.Contains(err.Error(), "license is required") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestShouldSkipConfigLoad(t *testing.T) {
 	wgCmd := &cobra.Command{Use: "wg"}
 	generateCmd := &cobra.Command{Use: "generate"}
+	updateCmd := &cobra.Command{Use: "update"}
 	wgCmd.AddCommand(generateCmd)
+	wgCmd.AddCommand(updateCmd)
 	socksCmd := &cobra.Command{Use: "socks"}
 
 	if !shouldSkipConfigLoad(generateCmd) {
 		t.Fatalf("expected wg generate to skip config load")
+	}
+	if !shouldSkipConfigLoad(updateCmd) {
+		t.Fatalf("expected wg update to skip config load")
 	}
 	if !shouldSkipConfigLoad(socksCmd) {
 		t.Fatalf("expected socks command to skip MASQUE config preload")

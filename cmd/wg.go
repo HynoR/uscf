@@ -10,5 +10,6 @@ var wgCmd = &cobra.Command{
 func init() {
 	wgCmd.AddCommand(newWGRegisterCmd())
 	wgCmd.AddCommand(newWGGenerateCmd())
+	wgCmd.AddCommand(newWGUpdateCmd())
 	rootCmd.AddCommand(wgCmd)
 }

@@ -14,7 +14,7 @@ import (
 )
 
 // RegisterWireGuardDevice creates a standalone WireGuard-compatible device using the provided public key.
-func RegisterWireGuardDevice(publicKey, model string) (models.AccountData, error) {
+func RegisterWireGuardDevice(publicKey, model, jwt string) (models.AccountData, error) {
 	if strings.TrimSpace(publicKey) == "" {
 		return models.AccountData{}, fmt.Errorf("public key is required")
 	}
@@ -51,6 +51,9 @@ func RegisterWireGuardDevice(publicKey, model string) (models.AccountData, error
 	}
 	for k, v := range internal.Headers {
 		req.Header.Set(k, v)
+	}
+	if strings.TrimSpace(jwt) != "" {
+		req.Header.Set("CF-Access-Jwt-Assertion", jwt)
 	}
 
 	resp, err := cloudflareHTTPClient.Do(req)

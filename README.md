@@ -110,6 +110,45 @@ USCF uses `account_mode` in `config.json` as the startup source of truth:
 - License bind success does not always mean immediate `warp=plus` behavior; Cloudflare side may still present `warp=on` for affected accounts.
 - If you hit that behavior, create a fresh account and bind license immediately (same recommendation as wgcf docs).
 
+#### Switching an existing free deployment to premium/team
+
+If you already deployed a free account and want to switch the account behind `config.json` to a higher tier, use the `proxy` command against the same config file:
+
+Upgrade free -> personal premium with a WARP+ license:
+
+```bash
+./uscf proxy -c /path/to/config.json --license YOUR-WARP-PLUS-LICENSE
+```
+
+Upgrade free -> team premium with a Zero Trust team token:
+
+```bash
+./uscf proxy -c /path/to/config.json --jwt YOUR-TEAM-JWT
+```
+
+Or drop the team token into a sibling `jwt.txt` file and let `proxy` consume it once:
+
+```bash
+printf '%s\n' 'YOUR-TEAM-JWT' > /path/to/jwt.txt
+./uscf proxy -c /path/to/config.json
+```
+
+If the current config is already `premium` or `team` and you want to switch to the other mode, first change `account_mode` in `config.json` back to `free`, then run one of the commands above.
+
+For the standalone WireGuard flow, use the same three-step pattern: upgrade the WG account, regenerate `wgcf.conf`, then restart the WireGuard SOCKS container.
+
+```bash
+# free -> premium (rebind license on the existing standalone WG account)
+./uscf wg update --wg-account /app/etc/wg-account.json --license YOUR-WARP-PLUS-LICENSE
+./uscf wg generate --wg-account /app/etc/wg-account.json --profile /app/etc/wgcf.conf
+
+# free -> team (register a new team WG account and overwrite wg-account.json)
+./uscf wg register --accept-tos --jwt YOUR-TEAM-JWT --wg-account /app/etc/wg-account.json
+./uscf wg generate --wg-account /app/etc/wg-account.json --profile /app/etc/wgcf.conf
+```
+
+Then restart the WireGuard SOCKS container so it reconnects with the regenerated `/app/etc/wgcf.conf`.
+
 
 ## Docker Deployment
 
@@ -146,6 +185,7 @@ This variant always derives its WireGuard runtime config from `/app/etc/wgcf.con
 
 For container mode, the image keeps the persisted `/app/etc/wgcf.conf` unchanged but creates a runtime-only sanitized copy before calling `wg-quick up`. Any `DNS = ...` line in `wgcf.conf` is ignored in this image, so the container does not try to rewrite `/etc/resolv.conf`.
 The runtime copy also injects `PostUp` / `PostDown` route-guard rules so replies to Docker port-mapped SOCKS connections can still leave through the container's original main route after WireGuard becomes the default route.
+Run this image with `--privileged`. `wg-quick` configures full-tunnel policy routing for the generated `wgcf.conf`, and container deployments that omit `--privileged` can fail when WireGuard tries to set `net.ipv4.conf.all.src_valid_mark=1`.
 
 #### First deployment with auto bootstrap
 
@@ -154,8 +194,7 @@ Mount a writable directory. Bootstrap is triggered only when `/app/etc/config.js
 ```bash
 docker run -d \
   --name uscf-wg \
-  --cap-add=NET_ADMIN \
-  --device=/dev/net/tun \
+  --privileged \
   -p 1080:1080 \
   -v /host/uscf:/app/etc \
   --restart unless-stopped \
@@ -172,8 +211,7 @@ The generated `config.json` uses anonymous SOCKS by default. If you want runtime
 ```bash
 docker run -d \
   --name uscf-wg \
-  --cap-add=NET_ADMIN \
-  --device=/dev/net/tun \
+  --privileged \
   -p 1081:1081 \
   -v /host/uscf:/app/etc \
   --restart unless-stopped \
@@ -189,8 +227,7 @@ If `config.json` and `wgcf.conf` already exist, the container skips registration
 ```bash
 docker run -d \
   --name uscf-wg \
-  --cap-add=NET_ADMIN \
-  --device=/dev/net/tun \
+  --privileged \
   -p 1080:1080 \
   -v /host/uscf/config.json:/app/etc/config.json:ro \
   -v /host/uscf/wgcf.conf:/app/etc/wgcf.conf:ro \
@@ -209,7 +246,7 @@ Behavior differences from the normal image:
 - In `socks` mode, tunnel-specific settings such as MASQUE identity, `bypass_domain`, `proxy_tcp_port`, `block_udp_443`, and remote/custom DNS options are ignored.
 - `wgcf.conf` may still contain `DNS = ...` for generic WireGuard compatibility, but this special image strips those lines from the runtime copy before `wg-quick up`, so container DNS is left untouched.
 - This image uses `uscf + wg-quick`; it does not embed `wgcf + microsocks`, and it does not support the old `HOST` / `PORT` / `USER` / `PASSWORD` environment-variable interface.
-- Re-registration or custom profile regeneration is done explicitly with `uscf wg register` / `uscf wg generate`, not by entrypoint environment variables.
+- Re-registration, license upgrade, or profile regeneration is done explicitly with `uscf wg register` / `uscf wg update` / `uscf wg generate`, not by entrypoint environment variables.
 - Connectivity recovery is handled by Docker `HEALTHCHECK` and your orchestrator restart policy; the entrypoint does not run an internal `curl` retry loop.
 - The built-in route guard requires a detectable pre-WireGuard IPv4 default route and source IPv4 address. If the container is IPv6-only or has unusual routing that hides them, startup will fail before `wg-quick up`.
 - Startup state rules are strict:
@@ -370,7 +407,13 @@ Available flags:
 - `--name string`: Device name shown in the 1.1.1.1 app
 - `--model string`: Device model shown in the 1.1.1.1 app (default "PC")
 - `--key string`: Existing base64 WireGuard private key (optional)
+- `--license string`: WARP+ license key; registers a new premium standalone WG account
+- `--jwt string`: Team token; registers a new team standalone WG account
 - `--accept-tos`: Accept Cloudflare Terms of Service non-interactively
+
+Notes:
+- `wg register --license` creates a new standalone WG account and immediately rebinds it to the target WARP+ license.
+- `wg register --jwt` creates a new standalone team WG account.
 
 ### wg generate Command
 
@@ -381,6 +424,20 @@ Available flags:
 Available flags:
 - `--wg-account string`: WireGuard account file path (default "wg-account.json")
 - `--profile string`: Output WireGuard profile path (default "wg-profile.conf")
+
+### wg update Command
+
+```bash
+./uscf wg update [flags]
+```
+
+Available flags:
+- `--wg-account string`: WireGuard account file path (default "wg-account.json")
+- `--license string`: WARP+ license key to bind to the existing standalone WG account
+
+Notes:
+- `wg update` only supports WARP+ license rebind on an existing standalone WG account.
+- `wg update` does not accept `--jwt`; team mode is created through `wg register --jwt`.
 
 ## Connection Example
 
