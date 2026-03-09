@@ -396,9 +396,13 @@ func TestShouldSkipConfigLoad(t *testing.T) {
 	wgCmd := &cobra.Command{Use: "wg"}
 	generateCmd := &cobra.Command{Use: "generate"}
 	wgCmd.AddCommand(generateCmd)
+	socksCmd := &cobra.Command{Use: "socks"}
 
 	if !shouldSkipConfigLoad(generateCmd) {
 		t.Fatalf("expected wg generate to skip config load")
+	}
+	if !shouldSkipConfigLoad(socksCmd) {
+		t.Fatalf("expected socks command to skip MASQUE config preload")
 	}
 	if shouldSkipConfigLoad(proxyCmd) {
 		t.Fatalf("expected proxy command not to skip config load")

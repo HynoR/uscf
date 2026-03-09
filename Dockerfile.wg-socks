@@ -1,0 +1,33 @@
+FROM golang:1.26.0-alpine AS builder
+
+WORKDIR /app
+
+COPY go.mod .
+COPY go.sum .
+
+RUN go mod download
+
+COPY . .
+
+ENV GOEXPERIMENT=greenteagc
+ENV CGO_ENABLED=0
+
+RUN go build -trimpath -o uscf -ldflags="-s -w" .
+
+FROM alpine:latest
+
+WORKDIR /app
+
+RUN mkdir -p /app/etc && \
+    apk add --no-cache bash ca-certificates curl jq iproute2 iptables openresolv wireguard-tools
+
+COPY --from=builder /app/uscf /bin/uscf
+COPY entrypoint-wg-socks.sh /app/entrypoint-wg-socks.sh
+COPY healthcheck-wg-socks.sh /app/healthcheck-wg-socks.sh
+
+RUN chmod +x /app/entrypoint-wg-socks.sh /app/healthcheck-wg-socks.sh
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD /app/healthcheck-wg-socks.sh
+
+ENTRYPOINT ["/app/entrypoint-wg-socks.sh"]

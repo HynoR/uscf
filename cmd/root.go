@@ -47,7 +47,7 @@ func Execute() error {
 
 func shouldSkipConfigLoad(cmd *cobra.Command) bool {
 	for current := cmd; current != nil; current = current.Parent() {
-		if current.Name() == "wg" {
+		if current.Name() == "wg" || current.Name() == "socks" {
 			return true
 		}
 	}

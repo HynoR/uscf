@@ -73,6 +73,60 @@ func TestLoadConfig_DualFileMerge(t *testing.T) {
 	}
 }
 
+func TestLoadPublicConfig_IgnoresKeyFileAndLegacyKeyFields(t *testing.T) {
+	backupConfig := AppConfig
+	backupLoaded := ConfigLoaded
+	t.Cleanup(func() {
+		AppConfig = backupConfig
+		ConfigLoaded = backupLoaded
+	})
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	keyPath := filepath.Join(dir, "key.json")
+
+	configContent := `{
+  "license": "legacy-inline-license",
+  "access_token": "legacy-inline-token",
+  "socks": {
+    "bind_address": "0.0.0.0",
+    "port": "2080",
+    "dns": ["1.1.1.1"]
+  },
+  "logging": {
+    "level": "debug",
+    "format": "json"
+  }
+}`
+	keyContent := `{
+  "license": "key-license",
+  "access_token": "key-token"
+}`
+	if err := os.WriteFile(configPath, []byte(configContent), 0o600); err != nil {
+		t.Fatalf("write config.json: %v", err)
+	}
+	if err := os.WriteFile(keyPath, []byte(keyContent), 0o600); err != nil {
+		t.Fatalf("write key.json: %v", err)
+	}
+
+	if err := LoadPublicConfig(configPath); err != nil {
+		t.Fatalf("LoadPublicConfig() error = %v", err)
+	}
+
+	if AppConfig.Socks.Port != "2080" {
+		t.Fatalf("AppConfig.Socks.Port = %q, want %q", AppConfig.Socks.Port, "2080")
+	}
+	if AppConfig.Logging.Level != "debug" {
+		t.Fatalf("AppConfig.Logging.Level = %q, want %q", AppConfig.Logging.Level, "debug")
+	}
+	if AppConfig.License != "" {
+		t.Fatalf("expected license to stay empty, got %q", AppConfig.License)
+	}
+	if AppConfig.AccessToken != "" {
+		t.Fatalf("expected access token to stay empty, got %q", AppConfig.AccessToken)
+	}
+}
+
 func TestLoadConfig_MigratesLegacySingleFile(t *testing.T) {
 	backupConfig := AppConfig
 	backupLoaded := ConfigLoaded

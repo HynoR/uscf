@@ -229,6 +229,53 @@ func LoadConfig(configPath string) error {
 	return nil
 }
 
+// LoadPublicConfig loads only reusable/public runtime settings from config.json.
+// It ignores both sibling key.json and any legacy key fields embedded in config.json.
+func LoadPublicConfig(configPath string) error {
+	if strings.TrimSpace(configPath) == "" {
+		configPath = "config.json"
+	}
+
+	file, err := os.Open(configPath)
+	if err != nil {
+		return fmt.Errorf("failed to open config file: %w", err)
+	}
+	defer file.Close()
+
+	var public PublicConfig
+	decoder := json.NewDecoder(file)
+	if err := decoder.Decode(&public); err != nil {
+		return fmt.Errorf("failed to decode config file: %w", err)
+	}
+
+	AppConfig = Config{
+		CustomEndpointsV4: append([]string(nil), public.CustomEndpointsV4...),
+		CustomEndpointsV6: append([]string(nil), public.CustomEndpointsV6...),
+		Socks:             public.Socks,
+		Registration:      public.Registration,
+		Logging:           public.Logging,
+	}
+
+	if AppConfig.Socks.Port == "" && AppConfig.Socks.BindAddress == "" && len(AppConfig.Socks.DNS) == 0 {
+		AppConfig.Socks = GetDefaultSocksConfig()
+	}
+	AppConfig.Socks, err = NormalizeSocksConfig(AppConfig.Socks)
+	if err != nil {
+		return err
+	}
+
+	defaultLogging := GetDefaultLoggingConfig()
+	if strings.TrimSpace(AppConfig.Logging.Level) == "" {
+		AppConfig.Logging.Level = defaultLogging.Level
+	}
+	if strings.TrimSpace(AppConfig.Logging.Format) == "" {
+		AppConfig.Logging.Format = defaultLogging.Format
+	}
+
+	ConfigLoaded = true
+	return nil
+}
+
 // GetDefaultSocksConfig 返回默认的SOCKS代理配置
 func GetDefaultSocksConfig() SocksConfig {
 	return SocksConfig{

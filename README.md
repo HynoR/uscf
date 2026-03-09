@@ -47,6 +47,32 @@ If you already have a configuration file, run directly:
 ./uscf proxy -c config.json
 ```
 
+### SOCKS-Only Mode
+
+If you only want USCF to expose a SOCKS5 server and let the host or container networking decide the egress path, use `socks`:
+
+```bash
+./uscf socks -c config.json -b 0.0.0.0
+```
+
+`uscf socks` only loads reusable settings from `config.json`. It does not create a TUN device, does not establish MASQUE, and does not read `key.json`.
+
+### Standalone WireGuard Registration And Profile Generation
+
+If you also want a standard WireGuard profile, use the `wg` command group. These commands use a separate `wg-account.json` file and do not depend on `config.json` or `key.json`.
+
+Register a standalone WireGuard device:
+
+```bash
+./uscf wg register --accept-tos --wg-account wg-account.json --name my-device --model PC
+```
+
+Generate a WireGuard profile from the saved account:
+
+```bash
+./uscf wg generate --wg-account wg-account.json --profile wg-profile.conf
+```
+
 Runtime endpoint selection priority:
 - If `custom_endpoints_v4` / `custom_endpoints_v6` has valid entries for current `socks.use_ipv6` family, USCF picks one randomly on each reconnect attempt.
 - If custom list is empty or invalid, USCF falls back to `endpoint_v4` / `endpoint_v6`.
@@ -93,11 +119,95 @@ USCF uses `account_mode` in `config.json` as the startup source of truth:
 docker build -t uscf:latest .
 ```
 
+### Build WireGuard SOCKS Docker Image
+
+This customer-oriented image is separate from the normal MASQUE image. It can run in two ways:
+
+- First deployment bootstrap: if `/app/etc/config.json`, `/app/etc/wg-account.json`, and `/app/etc/wgcf.conf` are all missing, the container auto-registers a free WireGuard account, auto-generates `wg-account.json` + `wgcf.conf`, then starts `uscf socks`.
+- Existing deployment: pre-populate `/app/etc/config.json` + `/app/etc/wgcf.conf` yourself. `wg-account.json` is optional in this case.
+
+Using the image in first-deployment bootstrap mode means you accept the Cloudflare Terms of Service, because the container will automatically call `uscf wg register --accept-tos`.
+
+Then build the special image:
+
+```bash
+docker build -f Dockerfile.wg-socks -t uscf:wg-socks .
+```
+
 ### RUN
 
 ```
 docker run -d   --name uscf   --network=host   -v  /etc/uscf/:/app/etc/   --log-driver json-file   --log-opt max-size=3m   --restart on-failure  --privileged  uscf
 ```
+
+### RUN WireGuard SOCKS Image
+
+This variant always brings up `/app/etc/wgcf.conf` with `wg-quick`, then starts `uscf socks -c /app/etc/config.json -b 0.0.0.0`.
+
+#### First deployment with auto bootstrap
+
+Mount a writable directory. Bootstrap is triggered only when `/app/etc/config.json`, `/app/etc/wg-account.json`, and `/app/etc/wgcf.conf` are all missing; unrelated files in `/app/etc` do not disable it.
+
+```bash
+docker run -d \
+  --name uscf-wg \
+  --cap-add=NET_ADMIN \
+  --device=/dev/net/tun \
+  -p 1080:1080 \
+  -v /host/uscf:/app/etc \
+  --restart unless-stopped \
+  uscf:wg-socks
+```
+
+Generated on first successful startup:
+- `/app/etc/config.json`
+- `/app/etc/wg-account.json`
+- `/app/etc/wgcf.conf`
+
+The generated `config.json` uses anonymous SOCKS by default. If you want runtime-only overrides, you can append normal `uscf socks` flags to `docker run`, for example:
+
+```bash
+docker run -d \
+  --name uscf-wg \
+  --cap-add=NET_ADMIN \
+  --device=/dev/net/tun \
+  -p 1081:1081 \
+  -v /host/uscf:/app/etc \
+  --restart unless-stopped \
+  uscf:wg-socks -p 1081 -u demo -w secret
+```
+
+These flags only affect the running process and do not rewrite `config.json`.
+
+#### Existing deployment with pre-generated files
+
+If `config.json` and `wgcf.conf` already exist, the container skips registration and profile generation and starts directly:
+
+```bash
+docker run -d \
+  --name uscf-wg \
+  --cap-add=NET_ADMIN \
+  --device=/dev/net/tun \
+  -p 1080:1080 \
+  -v /host/uscf/config.json:/app/etc/config.json:ro \
+  -v /host/uscf/wgcf.conf:/app/etc/wgcf.conf:ro \
+  --restart unless-stopped \
+  uscf:wg-socks
+```
+
+Expected existing-deployment layout:
+- `/host/uscf/config.json -> /app/etc/config.json`
+- `/host/uscf/wgcf.conf -> /app/etc/wgcf.conf`
+- `/host/uscf/wg-account.json -> /app/etc/wg-account.json` (optional)
+
+Behavior differences from the normal image:
+- Normal image runs `uscf proxy` and uses MASQUE/TUN.
+- WireGuard SOCKS image runs `wg-quick up /app/etc/wgcf.conf` and then `uscf socks`.
+- In `socks` mode, tunnel-specific settings such as MASQUE identity, `bypass_domain`, `proxy_tcp_port`, `block_udp_443`, and remote/custom DNS options are ignored.
+- Startup state rules are strict:
+  - all three of `config.json`, `wg-account.json`, `wgcf.conf` missing => bootstrap
+  - `config.json` + `wgcf.conf` present => start existing deployment
+  - any other partial combination => fail fast instead of auto-repair
 
 
 ## Configuration File Description
@@ -129,6 +239,10 @@ Bypass domain option:
 - `socks.bypass_domain`: domain allowlist for direct network egress. Matching rule is exact-or-subdomain (`example.com` matches both `example.com` and `a.example.com`).
 - When a destination domain matches this list, traffic bypasses MASQUE tunnel and uses the current host network directly.
 
+Proxy TCP port option:
+- `socks.proxy_tcp_port`: TCP destination port allowlist for MASQUE tunnel egress. Example: `[80, 443]` means only TCP/80 and TCP/443 use TUN; TCP/1001, TCP/992, TCP/1102 go out directly.
+- When `socks.proxy_tcp_port` is non-empty, it takes priority over `socks.bypass_domain` for TCP routing decisions. DNS behavior still follows `socks.remote_dns`.
+
 `config.json`:
 
 ```json
@@ -141,6 +255,7 @@ Bypass domain option:
     "username": "",
     "password": "",
     "bypass_domain": [],
+    "proxy_tcp_port": [],
     "connect_port": 443,
     "dns": [
       "1.1.1.1",
@@ -217,6 +332,47 @@ Available flags:
 - `--reset-config`: Reset SOCKS5 configuration to default values
 - `--use-ipv6`: Override `socks.use_ipv6` in config file for current startup
 - `-c, --config string`: Configuration file path (default "config.json")
+
+### socks Command
+
+```bash
+./uscf socks [flags]
+```
+
+Available flags:
+- `-c, --config string`: Configuration file path (default "config.json")
+- `-b, --bind-address string`: Bind address for the SOCKS5 listener
+- `-p, --port string`: Port for the SOCKS5 listener
+- `-u, --username string`: Username for SOCKS5 authentication
+- `-w, --password string`: Password for SOCKS5 authentication
+
+Notes:
+- `socks` reads only `config.json` public settings and ignores `key.json`.
+- `socks` does not create TUN or MASQUE connections; outbound traffic follows the current host or container routing table.
+- Startup logs will list ignored tunnel-specific settings if they are present in the config.
+
+### wg register Command
+
+```bash
+./uscf wg register [flags]
+```
+
+Available flags:
+- `--wg-account string`: WireGuard account file path (default "wg-account.json")
+- `--name string`: Device name shown in the 1.1.1.1 app
+- `--model string`: Device model shown in the 1.1.1.1 app (default "PC")
+- `--key string`: Existing base64 WireGuard private key (optional)
+- `--accept-tos`: Accept Cloudflare Terms of Service non-interactively
+
+### wg generate Command
+
+```bash
+./uscf wg generate [flags]
+```
+
+Available flags:
+- `--wg-account string`: WireGuard account file path (default "wg-account.json")
+- `--profile string`: Output WireGuard profile path (default "wg-profile.conf")
 
 ## Connection Example
 
