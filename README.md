@@ -166,6 +166,7 @@ This customer-oriented image is separate from the normal MASQUE image. It can ru
 - Existing deployment: pre-populate `/app/etc/config.json` + `/app/etc/wgcf.conf` yourself. `wg-account.json` is optional in this case.
 
 Using the image in first-deployment bootstrap mode means you accept the Cloudflare Terms of Service, because the container will automatically call `uscf wg register --accept-tos`.
+If you set `WG_TEAM_JWT` on the very first deployment, bootstrap switches to team registration and runs `uscf wg register --accept-tos --jwt ...` before generating `wgcf.conf`.
 
 Then build the special image:
 
@@ -186,6 +187,14 @@ This variant always derives its WireGuard runtime config from `/app/etc/wgcf.con
 For container mode, the image keeps the persisted `/app/etc/wgcf.conf` unchanged but creates a runtime-only sanitized copy before calling `wg-quick up`. Any `DNS = ...` line in `wgcf.conf` is ignored in this image, so the container does not try to rewrite `/etc/resolv.conf`.
 The runtime copy also injects `PostUp` / `PostDown` route-guard rules so replies to Docker port-mapped SOCKS connections can still leave through the container's original main route after WireGuard becomes the default route.
 Run this image with `--privileged`. `wg-quick` configures full-tunnel policy routing for the generated `wgcf.conf`, and container deployments that omit `--privileged` can fail when WireGuard tries to set `net.ipv4.conf.all.src_valid_mark=1`.
+If your container environment disables IPv6 by default, also add:
+
+```bash
+--sysctl net.ipv6.conf.all.disable_ipv6=0 \
+--sysctl net.ipv6.conf.default.disable_ipv6=0
+```
+
+Without those sysctls, `wg-quick` may fail at `ip -6 address add ... dev wgcf` with `RTNETLINK answers: Permission denied`.
 
 #### First deployment with auto bootstrap
 
@@ -195,6 +204,8 @@ Mount a writable directory. Bootstrap is triggered only when `/app/etc/config.js
 docker run -d \
   --name uscf-wg \
   --privileged \
+  --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+  --sysctl net.ipv6.conf.default.disable_ipv6=0 \
   -p 1080:1080 \
   -v /host/uscf:/app/etc \
   --restart unless-stopped \
@@ -206,12 +217,33 @@ Generated on first successful startup:
 - `/app/etc/wg-account.json`
 - `/app/etc/wgcf.conf`
 
+#### First deployment with team bootstrap
+
+To create a team WireGuard account on the first deployment, provide `WG_TEAM_JWT` as an environment variable:
+
+```bash
+docker run -d \
+  --name uscf-wg \
+  --privileged \
+  --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+  --sysctl net.ipv6.conf.default.disable_ipv6=0 \
+  -e WG_TEAM_JWT=YOUR-TEAM-JWT \
+  -p 1080:1080 \
+  -v /host/uscf:/app/etc \
+  --restart unless-stopped \
+  uscf:wg-socks
+```
+
+`WG_TEAM_JWT` is only consumed when all three of `config.json`, `wg-account.json`, and `wgcf.conf` are missing. If deployment state already exists, the image ignores `WG_TEAM_JWT` and continues normal startup without re-registering.
+
 The generated `config.json` uses anonymous SOCKS by default. If you want runtime-only overrides, you can append normal `uscf socks` flags to `docker run`, for example:
 
 ```bash
 docker run -d \
   --name uscf-wg \
   --privileged \
+  --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+  --sysctl net.ipv6.conf.default.disable_ipv6=0 \
   -p 1081:1081 \
   -v /host/uscf:/app/etc \
   --restart unless-stopped \
@@ -228,6 +260,8 @@ If `config.json` and `wgcf.conf` already exist, the container skips registration
 docker run -d \
   --name uscf-wg \
   --privileged \
+  --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+  --sysctl net.ipv6.conf.default.disable_ipv6=0 \
   -p 1080:1080 \
   -v /host/uscf/config.json:/app/etc/config.json:ro \
   -v /host/uscf/wgcf.conf:/app/etc/wgcf.conf:ro \
@@ -239,6 +273,15 @@ Expected existing-deployment layout:
 - `/host/uscf/config.json -> /app/etc/config.json`
 - `/host/uscf/wgcf.conf -> /app/etc/wgcf.conf`
 - `/host/uscf/wg-account.json -> /app/etc/wg-account.json` (optional)
+
+To upgrade an existing free deployment to premium, keep using the manual CLI flow:
+
+```bash
+./uscf wg update --wg-account /app/etc/wg-account.json --license YOUR-WARP-PLUS-LICENSE
+./uscf wg generate --wg-account /app/etc/wg-account.json --profile /app/etc/wgcf.conf
+```
+
+Then restart the container. The image does not support automatic premium bootstrap.
 
 Behavior differences from the normal image:
 - Normal image runs `uscf proxy` and uses MASQUE/TUN.

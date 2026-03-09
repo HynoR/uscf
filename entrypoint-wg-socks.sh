@@ -172,16 +172,25 @@ bootstrap_if_needed() {
     config_exists=0
     profile_exists=0
     account_exists=0
+    team_jwt=$(printf '%s' "${WG_TEAM_JWT:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
     [ -f "$SOCKS_CONFIG_PATH" ] && config_exists=1
     [ -f "$WG_CONFIG_PATH" ] && profile_exists=1
     [ -f "$WG_ACCOUNT_PATH" ] && account_exists=1
 
     if [ "$config_exists" -eq 0 ] && [ "$profile_exists" -eq 0 ] && [ "$account_exists" -eq 0 ]; then
-        echo "no WireGuard deployment state found; bootstrapping free account and profile..."
+        if [ -n "$team_jwt" ]; then
+            echo "no WireGuard deployment state found; bootstrapping team account and profile from WG_TEAM_JWT..."
+        else
+            echo "no WireGuard deployment state found; bootstrapping free account and profile..."
+        fi
 
         write_bootstrap_config
-        "$USCF_BIN" wg register --accept-tos --wg-account "$WG_ACCOUNT_TMP_PATH"
+        if [ -n "$team_jwt" ]; then
+            "$USCF_BIN" wg register --accept-tos --jwt "$team_jwt" --wg-account "$WG_ACCOUNT_TMP_PATH"
+        else
+            "$USCF_BIN" wg register --accept-tos --wg-account "$WG_ACCOUNT_TMP_PATH"
+        fi
         "$USCF_BIN" wg generate --wg-account "$WG_ACCOUNT_TMP_PATH" --profile "$WG_CONFIG_TMP_PATH"
         commit_bootstrap_files
 
@@ -190,6 +199,9 @@ bootstrap_if_needed() {
     fi
 
     if [ "$config_exists" -eq 1 ] && [ "$profile_exists" -eq 1 ]; then
+        if [ -n "$team_jwt" ]; then
+            echo "WG_TEAM_JWT is ignored because WireGuard deployment state already exists"
+        fi
         if [ "$account_exists" -eq 0 ]; then
             echo "starting existing deployment without wg-account.json"
         fi
