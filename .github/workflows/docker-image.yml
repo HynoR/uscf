@@ -3,6 +3,7 @@ name: Build Docker Images
 on:
   push:
     branches:
+      - main
       - dev
     tags:
       - '[0-9]*.[0-9]*'
@@ -11,7 +12,6 @@ on:
       - 'go.mod'
       - 'go.sum'
       - 'Dockerfile'
-      - 'Dockerfile.wg-socks'
       - 'entrypoint.sh'
       - 'healthcheck.sh'
       - 'entrypoint-wg-socks.sh'
@@ -20,13 +20,13 @@ on:
       - '.github/workflows/docker-image.yml'
   pull_request:
     branches:
+      - main
       - dev
     paths:
       - '**.go'
       - 'go.mod'
       - 'go.sum'
       - 'Dockerfile'
-      - 'Dockerfile.wg-socks'
       - 'entrypoint.sh'
       - 'healthcheck.sh'
       - 'entrypoint-wg-socks.sh'
@@ -51,22 +51,22 @@ jobs:
       matrix:
         include:
           - variant: regular
-            dockerfile: Dockerfile
+            target: runtime-regular
             runner: ubuntu-latest
             platform: linux/amd64
             platform_slug: linux-amd64
           - variant: regular
-            dockerfile: Dockerfile
+            target: runtime-regular
             runner: ubuntu-24.04-arm
             platform: linux/arm64
             platform_slug: linux-arm64
           - variant: wg
-            dockerfile: Dockerfile.wg-socks
+            target: runtime-wg
             runner: ubuntu-latest
             platform: linux/amd64
             platform_slug: linux-amd64
           - variant: wg
-            dockerfile: Dockerfile.wg-socks
+            target: runtime-wg
             runner: ubuntu-24.04-arm
             platform: linux/arm64
             platform_slug: linux-arm64
@@ -100,7 +100,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GitHub Container Registry
-        if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/dev')
+        if: github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/dev')
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -108,11 +108,12 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build image for validation
-        if: github.event_name == 'pull_request' || !(startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/dev')
+        if: github.event_name != 'push' || !(startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/dev')
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ${{ matrix.dockerfile }}
+          file: Dockerfile
+          target: ${{ matrix.target }}
           platforms: ${{ matrix.platform }}
           push: false
           labels: |
@@ -132,12 +133,13 @@ jobs:
           cache-to: type=gha,scope=${{ github.workflow }}-${{ matrix.variant }}-${{ matrix.platform_slug }},mode=max
 
       - name: Build and push by digest
-        if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/dev')
+        if: github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/dev')
         id: build
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ${{ matrix.dockerfile }}
+          file: Dockerfile
+          target: ${{ matrix.target }}
           platforms: ${{ matrix.platform }}
           outputs: type=image,name=${{ steps.image.outputs.ref }},push-by-digest=true,name-canonical=true,push=true
           labels: |
@@ -157,7 +159,7 @@ jobs:
           cache-to: type=gha,scope=${{ github.workflow }}-${{ matrix.variant }}-${{ matrix.platform_slug }},mode=max
 
       - name: Export digest
-        if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/dev')
+        if: github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/dev')
         shell: bash
         run: |
           mkdir -p /tmp/digests
@@ -165,7 +167,7 @@ jobs:
           touch "/tmp/digests/${digest#sha256:}"
 
       - name: Upload digest
-        if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/dev')
+        if: github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/dev')
         uses: actions/upload-artifact@v4
         with:
           name: digests-${{ matrix.variant }}-${{ matrix.platform_slug }}
@@ -174,7 +176,7 @@ jobs:
 
   merge:
     name: Publish manifests
-    if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/dev')
+    if: github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/dev')
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -211,11 +213,9 @@ jobs:
           tags: |
             type=raw,value=latest,enable=${{ matrix.variant == 'regular' && startsWith(github.ref, 'refs/tags/') }}
             type=raw,value=${{ github.ref_name }},enable=${{ matrix.variant == 'regular' && startsWith(github.ref, 'refs/tags/') }}
-            type=raw,value=dev,enable=${{ matrix.variant == 'regular' && github.ref == 'refs/heads/dev' }}
             type=raw,value=dev-{{sha}},enable=${{ matrix.variant == 'regular' && github.ref == 'refs/heads/dev' }}
             type=raw,value=wg-latest,enable=${{ matrix.variant == 'wg' && startsWith(github.ref, 'refs/tags/') }}
             type=raw,value=wg-${{ github.ref_name }},enable=${{ matrix.variant == 'wg' && startsWith(github.ref, 'refs/tags/') }}
-            type=raw,value=wg-dev,enable=${{ matrix.variant == 'wg' && github.ref == 'refs/heads/dev' }}
             type=raw,value=wg-dev-{{sha}},enable=${{ matrix.variant == 'wg' && github.ref == 'refs/heads/dev' }}
 
       - name: Set up Docker Buildx

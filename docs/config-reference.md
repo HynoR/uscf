@@ -1,0 +1,97 @@
+# USCF Configuration Reference
+
+USCF uses split configuration files for new deployments.
+
+- `config.json` is reusable runtime configuration.
+- `key.json` is usque account and MASQUE identity state.
+- `wg-account.json` and `wgcf.conf` are WG-mode state files.
+
+Do not put secrets into public examples. Real customer deployments should keep `/app/etc` private.
+
+## Common `config.json` Fields
+
+These fields are useful for both usque and WG mode.
+
+| Field | Default | Applies to | Purpose |
+|---|---|---|---|
+| `socks.bind_address` | `127.0.0.1` in Go defaults; Docker examples usually use `0.0.0.0` | both | SOCKS5 listen address |
+| `socks.port` | `1080` | both | SOCKS5 listen port |
+| `socks.username` | empty | both | Optional SOCKS5 username |
+| `socks.password` | empty | both | Optional SOCKS5 password |
+| `socks.connection_timeout` | `30s` | both | Timeout for outbound connection setup |
+| `socks.idle_timeout` | `5m` | both | Idle timeout for proxied connections |
+| `logging.level` | `info` | both | `debug`, `info`, `warn`, or `error` |
+| `logging.format` | `text` | both | `text` or `json` |
+| `logging.socks_verbose` | `false` | both | Extra SOCKS connection diagnostics |
+| `registration.device_name` | generated or empty | usque registration | Device name used during registration |
+
+Duration fields accept human-readable strings such as `"2s"`, `"30s"`, and `"5m"`. Legacy numeric nanosecond values are still accepted.
+
+## Usque-Only Runtime Fields
+
+These fields only affect `uscf proxy`. WG mode runs `uscf socks`, so it logs and ignores tunnel-only settings.
+
+| Field | Purpose |
+|---|---|
+| `custom_endpoints_v4` / `custom_endpoints_v6` | Optional MASQUE endpoint pools. If valid entries exist for the selected IP family, one is chosen randomly on reconnect. |
+| `socks.use_ipv6` | Use IPv6 endpoint and custom IPv6 endpoint pool for MASQUE connection. |
+| `socks.connect_port` | MASQUE endpoint UDP port. |
+| `socks.dns` | DNS servers used by local or tunnel DNS resolver. |
+| `socks.dns_timeout` | Per-DNS-query timeout. |
+| `socks.remote_dns` | Resolve through the tunnel instead of local DNS. |
+| `socks.no_tunnel_ipv4` / `socks.no_tunnel_ipv6` | Disable an IP family inside the MASQUE tunnel. |
+| `socks.block_udp_443` | Reject outbound UDP/443 through the SOCKS proxy. |
+| `socks.sni_address` | MASQUE TLS SNI override. Leave empty unless you know why it is needed. |
+| `socks.keepalive_period` | QUIC keepalive period. |
+| `socks.mtu` | Netstack TUN MTU. |
+| `socks.initial_packet_size` | Initial QUIC packet size. |
+| `socks.reconnect_delay` | Initial reconnect delay. |
+| `socks.max_reconnect_attempts` | Pause after this many consecutive failures. `0` means unlimited retry. |
+| `socks.self_check` | Periodically checks tunnel health and triggers reconnect after repeated failures. |
+
+## Split Routing
+
+Split routing only applies to usque mode.
+
+| Field | Behavior |
+|---|---|
+| `socks.bypass_domain` | Exact-or-subdomain list that goes directly through the current network instead of MASQUE. |
+| `socks.proxy_tcp_port` | TCP destination port allowlist for MASQUE. When non-empty, only listed TCP ports use MASQUE. |
+
+Priority rule:
+
+1. If `proxy_tcp_port` is non-empty, TCP routing follows the port allowlist.
+2. If `proxy_tcp_port` is empty, `bypass_domain` can send matching domains direct.
+3. DNS behavior still follows `remote_dns`.
+
+Use `bypass_domain` when only a few domains should avoid the tunnel. Use `proxy_tcp_port` when only a few destination ports should use the tunnel.
+
+## `key.json` Fields
+
+`key.json` is usque-only identity and account state. It is created by `uscf proxy` and should normally be edited only for intentional account switching.
+
+| Field | Purpose |
+|---|---|
+| `private_key` | MASQUE ECDSA private key |
+| `endpoint_v4` / `endpoint_v6` | Cloudflare MASQUE endpoint hosts |
+| `endpoint_pub_key` | Endpoint public key used for pinning |
+| `account_mode` | `free`, `premium`, or `team` |
+| `license` | Account license value returned by Cloudflare |
+| `id` | Cloudflare device/account id |
+| `access_token` | Token for Cloudflare API access |
+| `ipv4` / `ipv6` | Assigned tunnel addresses |
+
+If an existing `key.json` has `account_mode` set to `premium` or `team`, usque mode ignores new `--license` and `--jwt` flags. To intentionally switch account levels, set `account_mode` back to `free`, run the desired upgrade command, then restart.
+
+## WG-Mode Files And Environment
+
+| Item | Purpose |
+|---|---|
+| `wg-account.json` | Standalone WireGuard account state used by `uscf wg` commands |
+| `wgcf.conf` | WireGuard profile consumed by the WG image |
+| `WG_TEAM_JWT` | Optional first-bootstrap Team JWT. Ignored after deployment state exists. |
+| `SOCKS_BIND_ADDRESS` | Runtime bind override used by `entrypoint-wg-socks.sh`; default `0.0.0.0` |
+| `WG_INTERFACE` | WireGuard interface name; default `wgcf` |
+| `WG_RUNTIME_CONFIG_PATH` | Runtime-only sanitized profile path; must end with `/wgcf.conf` when interface is `wgcf` |
+
+The WG entrypoint strips `DNS = ...` from the runtime copy of `wgcf.conf` and injects route guard rules. The persisted `wgcf.conf` is not modified by startup.

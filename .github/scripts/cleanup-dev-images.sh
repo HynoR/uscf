@@ -88,8 +88,6 @@ analyze_bucket() {
   jq -r '
     def tags: (.metadata.container.tags // []);
     def protected_tag:
-      . == "dev" or
-      . == "wg-dev" or
       . == "latest" or
       . == "wg-latest" or
       test("^[0-9]+\\.[0-9]+(?:\\.[0-9]+)?(?:[-+][A-Za-z0-9._-]+)?$") or

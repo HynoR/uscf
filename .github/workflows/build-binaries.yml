@@ -16,22 +16,22 @@ jobs:
         include:
           - goos: windows
             goarch: amd64
-            asset_name: usque-windows-amd64.exe
+            asset_name: uscf-windows-amd64.exe
           - goos: windows
             goarch: arm64
-            asset_name: usque-windows-arm64.exe
+            asset_name: uscf-windows-arm64.exe
           - goos: linux
             goarch: amd64
-            asset_name: usque-linux-amd64
+            asset_name: uscf-linux-amd64
           - goos: linux
             goarch: arm64
-            asset_name: usque-linux-arm64
+            asset_name: uscf-linux-arm64
           - goos: darwin
             goarch: amd64
-            asset_name: usque-darwin-amd64
+            asset_name: uscf-darwin-amd64
           - goos: darwin
             goarch: arm64
-            asset_name: usque-darwin-arm64
+            asset_name: uscf-darwin-arm64
 
     steps:
       - name: Check out code
@@ -85,7 +85,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: ./artifacts
-          pattern: usque-*
+          pattern: uscf-*
           merge-multiple: true
 
       - name: Create Release and Upload Assets

@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM --platform=$BUILDPLATFORM golang:1.26.0-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26.3-alpine AS builder
 
 WORKDIR /app
 
@@ -27,22 +27,36 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     go build -trimpath -o uscf \
     -ldflags="-s -w -X github.com/HynoR/uscf/cmd.version=${VERSION} -X github.com/HynoR/uscf/cmd.commit=${COMMIT} -X github.com/HynoR/uscf/cmd.date=${BUILD_DATE}" .
 
-# scratch won't be enough, because we need a cert store
-FROM alpine:3.21
+FROM alpine:3.21 AS runtime-base
 
 WORKDIR /app
 
-# Create etc directory for configuration and install required tools
 RUN mkdir -p /app/etc && \
     apk add --no-cache curl jq
 
 COPY --from=builder /app/uscf /bin/uscf
-# Copy the scripts from the build context
+
+FROM runtime-base AS runtime-wg
+
+RUN apk add --no-cache bash ca-certificates iproute2 iptables wireguard-tools
+
+COPY entrypoint-wg-socks.sh /app/entrypoint-wg-socks.sh
+COPY healthcheck-wg-socks.sh /app/healthcheck-wg-socks.sh
+
+RUN chmod +x /app/entrypoint-wg-socks.sh /app/healthcheck-wg-socks.sh
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD /app/healthcheck-wg-socks.sh
+
+ENTRYPOINT ["/app/entrypoint-wg-socks.sh"]
+
+FROM runtime-base AS runtime-regular
+
 COPY entrypoint.sh /app/entrypoint.sh
 COPY healthcheck.sh /app/healthcheck.sh
+
 RUN chmod +x /app/entrypoint.sh /app/healthcheck.sh
 
-# Add healthcheck
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD /app/healthcheck.sh
 

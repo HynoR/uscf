@@ -13,7 +13,7 @@ import (
 
 var rootCmd = &cobra.Command{
 	Use:   "uscf",
-	Short: "Usque Warp CLI",
+	Short: "USCF Warp CLI",
 	Long:  "An unofficial Cloudflare Warp CLI that uses the MASQUE protocol and exposes the tunnel as various different services.",
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		if shouldSkipConfigLoad(cmd) {

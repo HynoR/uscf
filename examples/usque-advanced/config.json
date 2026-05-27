@@ -1,0 +1,42 @@
+{
+  "custom_endpoints_v4": [],
+  "custom_endpoints_v6": [],
+  "socks": {
+    "bind_address": "0.0.0.0",
+    "port": "1080",
+    "username": "",
+    "password": "",
+    "bypass_domain": [
+      "example.com"
+    ],
+    "proxy_tcp_port": [],
+    "connect_port": 443,
+    "dns": [
+      "1.1.1.1",
+      "8.8.8.8"
+    ],
+    "dns_timeout": "2s",
+    "remote_dns": false,
+    "use_ipv6": false,
+    "no_tunnel_ipv4": false,
+    "no_tunnel_ipv6": false,
+    "block_udp_443": true,
+    "sni_address": "",
+    "keepalive_period": "30s",
+    "mtu": 1280,
+    "initial_packet_size": 1242,
+    "reconnect_delay": "1s",
+    "max_reconnect_attempts": 0,
+    "connection_timeout": "30s",
+    "idle_timeout": "5m",
+    "self_check": false
+  },
+  "logging": {
+    "level": "info",
+    "format": "text",
+    "socks_verbose": false
+  },
+  "registration": {
+    "device_name": "uscf"
+  }
+}

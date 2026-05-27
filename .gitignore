@@ -32,5 +32,8 @@ bin/
 !README.md
 /*.md
 config.json
+!examples/
+!examples/**/
+!examples/**/config.json
 .gocache/
 bin/
