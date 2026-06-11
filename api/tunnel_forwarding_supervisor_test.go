@@ -112,13 +112,11 @@ func (d *testTunnelDevice) Close() {
 }
 
 func TestForwardingSupervisorSingleDeviceReaderAcrossSessionSwitches(t *testing.T) {
-	packetBufferPool = NewNetBuffer(2048)
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	device := newTestTunnelDevice()
-	supervisor := newForwardingSupervisor(ctx, device, &TunnelStats{})
+	supervisor := newForwardingSupervisor(ctx, device, &TunnelStats{}, NewNetBuffer(2048))
 	t.Cleanup(func() {
 		device.Close()
 		supervisor.Close()
@@ -156,13 +154,11 @@ func TestForwardingSupervisorSingleDeviceReaderAcrossSessionSwitches(t *testing.
 }
 
 func TestForwardingSupervisorDetachStopsOldSessionAndNewSessionWorks(t *testing.T) {
-	packetBufferPool = NewNetBuffer(2048)
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	device := newTestTunnelDevice()
-	supervisor := newForwardingSupervisor(ctx, device, &TunnelStats{})
+	supervisor := newForwardingSupervisor(ctx, device, &TunnelStats{}, NewNetBuffer(2048))
 	t.Cleanup(func() {
 		device.Close()
 		supervisor.Close()

@@ -16,19 +16,11 @@ import (
 	"golang.zx2c4.com/wireguard/tun"
 )
 
-// packetBuffCap is the standard packet buffer capacity.
-// 2*packetBuffCap serves as a soft cap threshold for returning buffers to the pool,
-// preventing accidentally enlarged buffers from polluting the pool and causing memory bloat (pool poisoning).
-// Production MTU < 1536, threshold 4096 provides sufficient headroom.
-const packetBuffCap = 2048
-
 const (
 	forwardingErrStreakThreshold = 5
 	forwardingErrBackoffBase     = 50 * time.Millisecond
 	forwardingErrBackoffMax      = 2 * time.Second
 )
-
-var packetBufferPool *NetBuffer
 
 var (
 	connectTunnelFunc  = ConnectTunnel
@@ -202,9 +194,7 @@ type ConnectionConfig struct {
 	Endpoint             *net.UDPAddr
 	EndpointSelector     func() *net.UDPAddr // Optional endpoint selector invoked for each connection attempt.
 	MTU                  int
-	MaxPacketRate        float64 // 每秒最大数据包处理速率
-	MaxBurst             int     // 突发处理数据包的最大数量
-	MaxReconnectAttempts int     // 连续连接失败达到阈值后暂停重连；0表示无限重试
+	MaxReconnectAttempts int // 连续连接失败达到阈值后暂停重连；0表示无限重试
 	SelfCheckEnabled     bool
 	SelfCheckDialFunc    func(ctx context.Context, network, addr string) (net.Conn, error)
 	ReconnectStrategy    BackoffStrategy
@@ -312,7 +302,7 @@ func monitorStats(ctx context.Context, stats *TunnelStats) {
 
 // handleConnection 处理单次连接
 func handleConnection(ctx context.Context, config ConnectionConfig, device TunnelDevice, stats *TunnelStats, reconnectAttempt int) (nextAttempt int, err error) {
-	forwarding := newForwardingSupervisor(ctx, device, stats)
+	forwarding := newForwardingSupervisor(ctx, device, stats, nil)
 	defer forwarding.Close()
 	return handleConnectionWithForwarding(ctx, config, forwarding, stats, reconnectAttempt)
 }
@@ -421,8 +411,8 @@ func MaintainTunnel(ctx context.Context, config ConnectionConfig, device TunnelD
 	stats := &TunnelStats{}
 	reconnectAttempt := 0
 	var err error
-	packetBufferPool = NewNetBuffer(config.MTU)
-	forwarding := newForwardingSupervisor(ctx, device, stats)
+	bufPool := NewNetBuffer(config.MTU)
+	forwarding := newForwardingSupervisor(ctx, device, stats, bufPool)
 	defer forwarding.Close()
 
 	for {

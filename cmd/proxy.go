@@ -13,7 +13,6 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -841,28 +840,23 @@ func normalizeDNSServerAddress(dns string) (string, error) {
 
 func newLocalDNSResolver() (socks5.NameResolver, error) {
 	dnsTimeout := config.AppConfig.Socks.DNSTimeout.Duration()
+	dnsServer := "8.8.8.8:53"
 	if len(config.AppConfig.Socks.DNS) > 0 {
-		dnsServer, err := normalizeDNSServerAddress(config.AppConfig.Socks.DNS[0])
+		var err error
+		dnsServer, err = normalizeDNSServerAddress(config.AppConfig.Socks.DNS[0])
 		if err != nil {
 			return nil, fmt.Errorf("Failed to parse local DNS server %s: %v", config.AppConfig.Socks.DNS[0], err)
 		}
-		return api.NewCachingDNSResolver(
-			dnsServer,
-			dnsTimeout,
-		), nil
 	}
-	return api.NewCachingDNSResolver(
-		"8.8.8.8:53",
-		dnsTimeout,
-	), nil
+	return &api.LocalDNSResolver{
+		DNSServer: dnsServer,
+		Timeout:   dnsTimeout,
+	}, nil
 }
 
 // setupAndRunSocksProxy 设置并运行SOCKS5代理
 func setupAndRunSocksProxy(cmd *cobra.Command) error {
 	slog.Info("preparing SOCKS5 proxy")
-
-	// 设置最大并发处理能力
-	runtime.GOMAXPROCS(runtime.NumCPU())
 
 	// 准备TLS配置
 	tlsConfig, err := prepareTlsConfig(cmd)
@@ -1042,8 +1036,6 @@ func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint *net.UDPAdd
 		Endpoint:             endpoint,
 		EndpointSelector:     endpointSelector,
 		MTU:                  mtu,
-		MaxPacketRate:        8192,
-		MaxBurst:             1024,
 		MaxReconnectAttempts: maxReconnectAttempts,
 		SelfCheckEnabled:     config.AppConfig.Socks.SelfCheck,
 		SelfCheckDialFunc:    tunNet.DialContext,
@@ -1130,6 +1122,9 @@ func prepareSocksRuntime(tunNet *netstack.Net, connectionTimeout, idleTimeout ti
 		}
 		resolver = localResolver
 	}
+
+	// 统一加缓存层，让 local / tunnel / bypass 三条路径都能享受缓存和 singleflight
+	resolver = api.NewCachingResolver(resolver, 10*time.Minute, 5*time.Second, 4096)
 
 	if config.AppConfig.Socks.BlockUDP443 {
 		slog.Info("UDP/443 blocking enabled; outbound QUIC/UDP will be rejected")
@@ -1225,13 +1220,23 @@ func runSocksServer(socksRuntime *socksRuntime, idleTimeout time.Duration) error
 	}
 
 	var connSeq atomic.Uint64
+	acceptBackoff := 5 * time.Millisecond
 
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				slog.Info("SOCKS listener closed, shutting down")
+				return nil
+			}
 			slog.Warn("failed to accept connection", "error", err)
+			time.Sleep(acceptBackoff)
+			if acceptBackoff < 1*time.Second {
+				acceptBackoff *= 2
+			}
 			continue
 		}
+		acceptBackoff = 5 * time.Millisecond
 		connID := connSeq.Add(1)
 		if socksRuntime.VerboseLoggingEnabled() {
 			remote := "<unknown>"

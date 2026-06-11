@@ -40,8 +40,9 @@ type forwardingSupervisor struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	device TunnelDevice
-	stats  *TunnelStats
+	device  TunnelDevice
+	stats   *TunnelStats
+	bufPool *NetBuffer
 
 	mu     sync.RWMutex
 	active *forwardSession
@@ -50,13 +51,17 @@ type forwardingSupervisor struct {
 	wg        sync.WaitGroup
 }
 
-func newForwardingSupervisor(parentCtx context.Context, device TunnelDevice, stats *TunnelStats) *forwardingSupervisor {
+func newForwardingSupervisor(parentCtx context.Context, device TunnelDevice, stats *TunnelStats, bufPool *NetBuffer) *forwardingSupervisor {
 	ctx, cancel := context.WithCancel(parentCtx)
+	if bufPool == nil {
+		bufPool = NewNetBuffer(1280)
+	}
 	s := &forwardingSupervisor{
-		ctx:    ctx,
-		cancel: cancel,
-		device: device,
-		stats:  stats,
+		ctx:     ctx,
+		cancel:  cancel,
+		device:  device,
+		stats:   stats,
+		bufPool: bufPool,
 	}
 	s.wg.Add(1)
 	go s.runDeviceToIP()
@@ -159,11 +164,11 @@ func (s *forwardingSupervisor) runDeviceToIP() {
 		default:
 		}
 
-		buf := packetBufferPool.GetBuf()
+		buf := s.bufPool.GetBuf()
 
 		n, err := s.device.ReadPacket(*buf)
 		if err != nil {
-			packetBufferPool.PutBuf(buf)
+			s.bufPool.PutBuf(buf)
 			if s.ctx.Err() != nil {
 				return
 			}
@@ -183,9 +188,7 @@ func (s *forwardingSupervisor) runDeviceToIP() {
 			errStreak = 0
 			backoff = 0
 			lastSessionID = 0
-			if cap(*buf) < 2*packetBuffCap {
-				packetBufferPool.PutBuf(buf)
-			}
+			s.bufPool.PutBuf(buf)
 			continue
 		}
 
@@ -197,7 +200,7 @@ func (s *forwardingSupervisor) runDeviceToIP() {
 
 		icmp, err := session.conn.WritePacket((*buf)[:n])
 		if err != nil {
-			packetBufferPool.PutBuf(buf)
+			s.bufPool.PutBuf(buf)
 			if !s.isActiveSession(session) {
 				continue
 			}
@@ -222,9 +225,7 @@ func (s *forwardingSupervisor) runDeviceToIP() {
 
 		errStreak = 0
 		backoff = 0
-		if cap(*buf) < 2*packetBuffCap {
-			packetBufferPool.PutBuf(buf)
-		}
+		s.bufPool.PutBuf(buf)
 
 		if len(icmp) > 0 {
 			if err := s.device.WritePacket(icmp); err != nil {
@@ -255,10 +256,10 @@ func (s *forwardingSupervisor) runIPToDevice(session *forwardSession) {
 		default:
 		}
 
-		buf := packetBufferPool.GetBuf()
+		buf := s.bufPool.GetBuf()
 		n, err := session.conn.ReadPacket(*buf, true)
 		if err != nil {
-			packetBufferPool.PutBuf(buf)
+			s.bufPool.PutBuf(buf)
 			if session.ctx.Err() != nil {
 				return
 			}
@@ -288,13 +289,11 @@ func (s *forwardingSupervisor) runIPToDevice(session *forwardSession) {
 
 		s.stats.RecordPacketIn(n)
 		if err := s.device.WritePacket((*buf)[:n]); err != nil {
-			packetBufferPool.PutBuf(buf)
+			s.bufPool.PutBuf(buf)
 			s.reportSessionError(session, fmt.Errorf("failed to write to TUN device: %v", err))
 			return
 		}
-		if cap(*buf) < 2*packetBuffCap {
-			packetBufferPool.PutBuf(buf)
-		}
+		s.bufPool.PutBuf(buf)
 	}
 }
 
