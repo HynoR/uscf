@@ -155,6 +155,7 @@ func ignoredSocksOnlySettings(cfg config.Config) []string {
 	add(cfg.Socks.InitialPacketSize != defaults.InitialPacketSize, "initial_packet_size")
 	add(cfg.Socks.ReconnectDelay.Duration() != defaults.ReconnectDelay.Duration(), "reconnect_delay")
 	add(cfg.Socks.MaxReconnectAttempts != defaults.MaxReconnectAttempts, "max_reconnect_attempts")
+	add(cfg.Socks.DrainGrace.Duration() != defaults.DrainGrace.Duration(), "drain_grace")
 	add(cfg.Socks.SelfCheck, "self_check")
 
 	sort.Strings(ignored)

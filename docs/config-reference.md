@@ -47,6 +47,7 @@ These fields only affect `uscf proxy`. WG mode runs `uscf socks`, so it logs and
 | `socks.initial_packet_size` | Initial QUIC packet size. |
 | `socks.reconnect_delay` | Initial reconnect delay. |
 | `socks.max_reconnect_attempts` | Pause after this many consecutive failures. `0` means unlimited retry. |
+| `socks.drain_grace` | Keep existing SOCKS connections open during short tunnel outages; if the tunnel is still down after this duration, active SOCKS connections are drained. |
 | `socks.self_check` | Periodically checks tunnel health and triggers reconnect after repeated failures. |
 
 ## Split Routing

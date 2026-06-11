@@ -136,3 +136,56 @@ func TestSocksRuntimeRestartAndDrainClosesTrackedConnections(t *testing.T) {
 		t.Fatalf("expected tracked2 write to fail after drain")
 	}
 }
+
+func TestSocksRuntimeScheduleDrainCanBeCancelled(t *testing.T) {
+	runtime := newRuntimeForTest(func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return nil, errors.New("not used")
+	})
+	runtime.SetTunnelUp(false)
+
+	client, peer := net.Pipe()
+	defer peer.Close()
+	tracked := runtime.TrackConn(client)
+	defer tracked.Close()
+
+	runtime.ScheduleDrain(errors.New("temporary disconnect"), 50*time.Millisecond)
+	runtime.SetTunnelUp(true)
+	if !runtime.CancelScheduledDrain() {
+		t.Fatalf("expected scheduled drain to be cancelled")
+	}
+
+	time.Sleep(80 * time.Millisecond)
+	if runtime.activeConnCount() != 1 {
+		t.Fatalf("expected tracked connection to survive cancelled drain, got: %d", runtime.activeConnCount())
+	}
+}
+
+func TestSocksRuntimeScheduleDrainClosesTrackedConnectionsAfterGrace(t *testing.T) {
+	runtime := newRuntimeForTest(func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return nil, errors.New("not used")
+	})
+	runtime.SetTunnelUp(false)
+
+	client, peer := net.Pipe()
+	defer peer.Close()
+	tracked := runtime.TrackConn(client)
+
+	runtime.ScheduleDrain(errors.New("persistent disconnect"), 20*time.Millisecond)
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for runtime.activeConnCount() != 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if runtime.activeConnCount() != 0 {
+		t.Fatalf("expected scheduled drain to close tracked connections, got: %d", runtime.activeConnCount())
+	}
+
+	_ = peer.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	_, err := peer.Read(make([]byte, 1))
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("expected peer EOF after scheduled drain, got: %v", err)
+	}
+	if _, err := tracked.Write([]byte("x")); err == nil {
+		t.Fatalf("expected tracked write to fail after scheduled drain")
+	}
+}

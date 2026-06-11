@@ -18,6 +18,8 @@ type socksRuntime struct {
 	tunnelUp       atomic.Bool
 	verboseLogging atomic.Bool
 	restartMu      sync.Mutex
+	drainMu        sync.Mutex
+	scheduledDrain *time.Timer
 	activeConns    sync.Map
 	server         atomic.Value // *socks5.Server
 	serverFactory  func(dialFunc func(ctx context.Context, network, addr string) (net.Conn, error)) *socks5.Server
@@ -119,6 +121,8 @@ func (r *socksRuntime) TrackConn(conn net.Conn) net.Conn {
 }
 
 func (r *socksRuntime) RestartAndDrain(reason error) {
+	r.CancelScheduledDrain()
+
 	r.restartMu.Lock()
 	defer r.restartMu.Unlock()
 	start := time.Now()
@@ -136,6 +140,58 @@ func (r *socksRuntime) RestartAndDrain(reason error) {
 		"duration",
 		time.Since(start),
 	)
+}
+
+func (r *socksRuntime) ScheduleDrain(reason error, grace time.Duration) {
+	if grace <= 0 {
+		r.RestartAndDrain(reason)
+		return
+	}
+
+	r.drainMu.Lock()
+	if r.scheduledDrain != nil {
+		r.drainMu.Unlock()
+		slog.Debug("SOCKS drain already scheduled", "reason", reason, "grace", grace)
+		return
+	}
+
+	var timer *time.Timer
+	timer = time.AfterFunc(grace, func() {
+		r.clearScheduledDrain(timer)
+		if r.IsTunnelUp() {
+			slog.Info("scheduled SOCKS drain skipped after tunnel recovery", "reason", reason)
+			return
+		}
+		r.RestartAndDrain(reason)
+	})
+	r.scheduledDrain = timer
+	r.drainMu.Unlock()
+
+	slog.Warn("scheduled SOCKS drain after tunnel grace", "reason", reason, "grace", grace)
+}
+
+func (r *socksRuntime) CancelScheduledDrain() bool {
+	r.drainMu.Lock()
+	timer := r.scheduledDrain
+	r.scheduledDrain = nil
+	r.drainMu.Unlock()
+
+	if timer == nil {
+		return false
+	}
+	stopped := timer.Stop()
+	if stopped {
+		slog.Info("scheduled SOCKS drain cancelled after tunnel recovery")
+	}
+	return stopped
+}
+
+func (r *socksRuntime) clearScheduledDrain(timer *time.Timer) {
+	r.drainMu.Lock()
+	if r.scheduledDrain == timer {
+		r.scheduledDrain = nil
+	}
+	r.drainMu.Unlock()
 }
 
 func (r *socksRuntime) drainActiveConnections() int {

@@ -130,6 +130,7 @@ type SocksConfig struct {
 	InitialPacketSize    uint16   `json:"initial_packet_size"`    // MASQUE连接的初始包大小
 	ReconnectDelay       Duration `json:"reconnect_delay"`        // 重连尝试之间的延迟
 	MaxReconnectAttempts int      `json:"max_reconnect_attempts"` // 连续连接失败阈值；达到后暂停重连等待人工处理，0表示无限重试
+	DrainGrace           Duration `json:"drain_grace"`            // 隧道断开后保留现有SOCKS连接的宽限期，超时仍未恢复则关闭
 	ConnectionTimeout    Duration `json:"connection_timeout"`     // 建立连接的超时时间
 	IdleTimeout          Duration `json:"idle_timeout"`           // 空闲连接的超时时间
 	SelfCheck            bool     `json:"self_check"`             // 是否启用隧道自检并在连续失败后重连
@@ -139,12 +140,12 @@ type SocksConfig struct {
 type SSHSocksConfig struct {
 	BindAddress       string   `json:"bind_address"`       // 代理绑定的地址
 	Port              string   `json:"port"`               // 代理监听的端口
-	Username          string   `json:"username"`            // 代理认证的用户名
-	Password          string   `json:"password"`            // 代理认证的密码
-	HourlyThreshold   int      `json:"hourly_threshold"`    // 每小时同一IP连接次数阈值，超过则锁定/24子网，默认15
-	Whitelist         []string `json:"whitelist"`           // 白名单，host或IP，命中后不参与计数器统计
-	ConnectionTimeout Duration `json:"connection_timeout"`  // 建立连接的超时时间
-	IdleTimeout       Duration `json:"idle_timeout"`        // 空闲连接的超时时间
+	Username          string   `json:"username"`           // 代理认证的用户名
+	Password          string   `json:"password"`           // 代理认证的密码
+	HourlyThreshold   int      `json:"hourly_threshold"`   // 每小时同一IP连接次数阈值，超过则锁定/24子网，默认15
+	Whitelist         []string `json:"whitelist"`          // 白名单，host或IP，命中后不参与计数器统计
+	ConnectionTimeout Duration `json:"connection_timeout"` // 建立连接的超时时间
+	IdleTimeout       Duration `json:"idle_timeout"`       // 空闲连接的超时时间
 }
 
 // GetDefaultSSHSocksConfig 返回默认的SSH SOCKS5网关配置
@@ -344,6 +345,7 @@ func GetDefaultSocksConfig() SocksConfig {
 		InitialPacketSize:    1242,
 		ReconnectDelay:       Duration(1 * time.Second),
 		MaxReconnectAttempts: 0,
+		DrainGrace:           Duration(15 * time.Second),
 		ConnectionTimeout:    Duration(30 * time.Second),
 		IdleTimeout:          Duration(5 * time.Minute),
 		SelfCheck:            false,
@@ -424,6 +426,9 @@ func NormalizeSocksConfig(cfg SocksConfig) (SocksConfig, error) {
 	}
 	if normalized.ProxyTCPPort == nil {
 		normalized.ProxyTCPPort = []int{}
+	}
+	if normalized.DrainGrace.Duration() <= 0 {
+		normalized.DrainGrace = GetDefaultSocksConfig().DrainGrace
 	}
 	return normalized, nil
 }
