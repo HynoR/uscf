@@ -47,6 +47,8 @@ type forwardingSupervisor struct {
 	mu     sync.RWMutex
 	active *forwardSession
 
+	icmpCh chan []byte
+
 	sessionID uint64
 	wg        sync.WaitGroup
 }
@@ -62,9 +64,11 @@ func newForwardingSupervisor(parentCtx context.Context, device TunnelDevice, sta
 		device:  device,
 		stats:   stats,
 		bufPool: bufPool,
+		icmpCh:  make(chan []byte, 32),
 	}
-	s.wg.Add(1)
+	s.wg.Add(2)
 	go s.runDeviceToIP()
+	go s.runICMPInjector()
 	return s
 }
 
@@ -228,17 +232,37 @@ func (s *forwardingSupervisor) runDeviceToIP() {
 		s.bufPool.PutBuf(buf)
 
 		if len(icmp) > 0 {
-			if err := s.device.WritePacket(icmp); err != nil {
-				if errors.As(err, new(*connectip.CloseError)) {
-					if s.isActiveSession(session) {
-						s.reportSessionError(session, fmt.Errorf("failed to write ICMP to TUN device: %v", err))
-					}
-					continue
-				}
+			// Never inject the ICMP packet from this goroutine: it is the sole
+			// reader of the TUN device, and netstack can synchronously emit a
+			// retransmission while handling the ICMP error. That emission blocks
+			// on the device's unbuffered packet channel until the device is read
+			// again, which would deadlock this loop permanently. Hand the packet
+			// to a dedicated injector goroutine instead.
+			select {
+			case s.icmpCh <- icmp:
+			default:
+				slog.Debug("dropping ICMP packet: injector queue full")
+			}
+		}
+	}
+}
+
+// runICMPInjector writes ICMP packets produced by the IP connection (e.g.
+// "datagram too large" responses) back into the TUN device. This must happen
+// off the runDeviceToIP goroutine; see the comment at the icmpCh send site.
+func (s *forwardingSupervisor) runICMPInjector() {
+	defer s.wg.Done()
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case pkt := <-s.icmpCh:
+			if err := s.device.WritePacket(pkt); err != nil {
 				slog.Debug("error writing ICMP to TUN device; continuing", "error", err)
 				continue
 			}
-			s.stats.RecordPacketIn(len(icmp))
+			s.stats.RecordPacketIn(len(pkt))
 		}
 	}
 }

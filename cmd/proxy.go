@@ -1137,7 +1137,7 @@ func prepareSocksRuntime(tunNet *netstack.Net, connectionTimeout, idleTimeout ti
 		if config.AppConfig.Socks.BlockUDP443 && strings.HasPrefix(network, "udp") {
 			_, port, err := net.SplitHostPort(addr)
 			if err == nil && port == "443" {
-				return nil, fmt.Errorf("udp/443 blocked by config")
+				return nil, errUDP443Blocked
 			}
 		}
 
@@ -1325,6 +1325,24 @@ func createSocksServer(
 
 type socks5SlogLogger struct{}
 
+var errUDP443Blocked = errors.New("udp/443 blocked by config")
+
 func (socks5SlogLogger) Errorf(format string, args ...interface{}) {
-	slog.Error(fmt.Sprintf("socks5: "+format, args...))
+	msg := fmt.Sprintf("socks5: "+format, args...)
+	if shouldDowngradeSocks5Log(format, args...) {
+		slog.Debug(msg)
+		return
+	}
+	slog.Error(msg)
+}
+
+func shouldDowngradeSocks5Log(format string, args ...interface{}) bool {
+	if format == "client want to used addr %v, listen addr: %s" {
+		return true
+	}
+	if format != "connect to %v failed, %v" || len(args) == 0 {
+		return false
+	}
+	err, ok := args[len(args)-1].(error)
+	return ok && errors.Is(err, errUDP443Blocked)
 }

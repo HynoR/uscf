@@ -204,6 +204,84 @@ func TestForwardingSupervisorDetachStopsOldSessionAndNewSessionWorks(t *testing.
 	newSession.close()
 }
 
+// icmpForwardingConn returns a fixed ICMP packet for every written packet,
+// mimicking connect-ip's handling of quic.DatagramTooLargeError.
+type icmpForwardingConn struct {
+	*testForwardingConn
+	icmp []byte
+}
+
+func (c *icmpForwardingConn) WritePacket(pkt []byte) ([]byte, error) {
+	_, err := c.testForwardingConn.WritePacket(pkt)
+	if err != nil {
+		return nil, err
+	}
+	return c.icmp, nil
+}
+
+// writeNeedsReaderDevice blocks WritePacket until a ReadPacket call is in
+// flight, mimicking the wireguard netstack device: injecting a packet can
+// synchronously trigger an egress packet that blocks on the unbuffered
+// incomingPacket channel until the device is read again.
+type writeNeedsReaderDevice struct {
+	*testTunnelDevice
+}
+
+func (d *writeNeedsReaderDevice) WritePacket(pkt []byte) error {
+	for atomic.LoadInt32(&d.activeReads) == 0 {
+		select {
+		case <-d.closeCh:
+			return errors.New("device closed")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	return d.testTunnelDevice.WritePacket(pkt)
+}
+
+func TestForwardingSupervisorICMPInjectionDoesNotBlockDevicePump(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	base := newTestTunnelDevice()
+	device := &writeNeedsReaderDevice{testTunnelDevice: base}
+	supervisor := newForwardingSupervisor(ctx, device, &TunnelStats{}, NewNetBuffer(2048))
+	t.Cleanup(func() {
+		base.Close()
+		supervisor.Close()
+	})
+
+	conn := &icmpForwardingConn{
+		testForwardingConn: newTestForwardingConn(),
+		icmp:               []byte{0xFE},
+	}
+	session, err := supervisor.attach(conn)
+	if err != nil {
+		t.Fatalf("attach session failed: %v", err)
+	}
+	defer func() {
+		supervisor.Detach(session)
+		session.close()
+	}()
+
+	// Each forwarded packet yields an ICMP response that must be injected
+	// back into the device. If the injection happened on the device-reader
+	// goroutine, the pump would deadlock after the first packet.
+	base.readPackets <- []byte{0x01}
+	if got := waitConnPacket(t, conn.writePackets, time.Second); got[0] != 0x01 {
+		t.Fatalf("unexpected first packet: %#v", got)
+	}
+
+	base.readPackets <- []byte{0x02}
+	if got := waitConnPacket(t, conn.writePackets, 2*time.Second); got[0] != 0x02 {
+		t.Fatalf("unexpected second packet: %#v", got)
+	}
+
+	if got := waitConnPacket(t, base.writePackets, 2*time.Second); got[0] != 0xFE {
+		t.Fatalf("unexpected ICMP packet on device: %#v", got)
+	}
+}
+
 func waitConnPacket(t *testing.T, ch <-chan []byte, timeout time.Duration) []byte {
 	t.Helper()
 	select {
