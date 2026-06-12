@@ -22,12 +22,19 @@ type socksServer interface {
 	ServeConn(net.Conn) error
 }
 
+// drainHandle wraps a scheduled drain timer. The runtime stores it behind a
+// pointer whose identity is set before the timer fires, letting the AfterFunc
+// callback compare identity without racing on the timer assignment.
+type drainHandle struct {
+	timer *time.Timer
+}
+
 type socksRuntime struct {
 	tunnelUp       atomic.Bool
 	verboseLogging atomic.Bool
 	restartMu      sync.Mutex
 	drainMu        sync.Mutex
-	scheduledDrain *time.Timer
+	scheduledDrain *drainHandle
 	activeConns    sync.Map
 	server         atomic.Value // socksServer
 	serverFactory  func(dialFunc socksDialFunc) socksServer
@@ -202,16 +209,21 @@ func (r *socksRuntime) ScheduleDrain(reason error, grace time.Duration) {
 		return
 	}
 
-	var timer *time.Timer
-	timer = time.AfterFunc(grace, func() {
-		r.clearScheduledDrain(timer)
+	// handle's pointer identity is created before the timer so the AfterFunc
+	// callback only ever reads this fully-assigned pointer (captured by the
+	// closure) instead of a variable still being written by time.AfterFunc.
+	// handle.timer is assigned below while still holding drainMu, and is only
+	// read again under drainMu (CancelScheduledDrain), so it carries no race.
+	handle := &drainHandle{}
+	r.scheduledDrain = handle
+	handle.timer = time.AfterFunc(grace, func() {
+		r.clearScheduledDrain(handle)
 		if r.IsTunnelUp() {
 			slog.Info("scheduled SOCKS drain skipped after tunnel recovery", "reason", reason)
 			return
 		}
 		r.RestartAndDrain(reason)
 	})
-	r.scheduledDrain = timer
 	r.drainMu.Unlock()
 
 	slog.Warn("scheduled SOCKS drain after tunnel grace", "reason", reason, "grace", grace)
@@ -219,23 +231,23 @@ func (r *socksRuntime) ScheduleDrain(reason error, grace time.Duration) {
 
 func (r *socksRuntime) CancelScheduledDrain() bool {
 	r.drainMu.Lock()
-	timer := r.scheduledDrain
+	handle := r.scheduledDrain
 	r.scheduledDrain = nil
 	r.drainMu.Unlock()
 
-	if timer == nil {
+	if handle == nil {
 		return false
 	}
-	stopped := timer.Stop()
+	stopped := handle.timer.Stop()
 	if stopped {
 		slog.Info("scheduled SOCKS drain cancelled after tunnel recovery")
 	}
 	return stopped
 }
 
-func (r *socksRuntime) clearScheduledDrain(timer *time.Timer) {
+func (r *socksRuntime) clearScheduledDrain(handle *drainHandle) {
 	r.drainMu.Lock()
-	if r.scheduledDrain == timer {
+	if r.scheduledDrain == handle {
 		r.scheduledDrain = nil
 	}
 	r.drainMu.Unlock()
