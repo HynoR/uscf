@@ -155,11 +155,14 @@ func TestCachingResolver_Eviction(t *testing.T) {
 		t.Fatalf("expected cache size <= 2 after eviction, got %d", len(r.cache))
 	}
 
-	// The oldest entry may have been evicted; querying it should hit upstream again.
+	// Eviction removes an arbitrary entry (map iteration order), so one of
+	// a.com/b.com was dropped — querying both must hit upstream at least once
+	// (possibly twice, since the re-insert can evict the other candidate).
 	callsBefore := inner.calls
 	_, _, _ = r.Resolve(ctx, "a.com")
+	_, _, _ = r.Resolve(ctx, "b.com")
 	if inner.calls == callsBefore {
-		t.Fatal("expected upstream call after eviction")
+		t.Fatal("expected an upstream call after eviction")
 	}
 }
 
