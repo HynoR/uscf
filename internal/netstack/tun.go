@@ -8,6 +8,8 @@
 //   - buffered incomingPacket channel (incomingPacketQueueDepth)
 //   - batched Read: blocks for the first packet, then drains the queue
 //     non-blocking up to len(buf); BatchSize() reports batchSize instead of 1
+//   - gVisor TCP tuning: raised buffer ranges, receive-buffer moderation,
+//     cubic congestion control, Nagle disabled
 package netstack
 
 import (
@@ -50,6 +52,16 @@ import (
 // memory: depth × MTU (~0.7 MiB at 1280).
 const incomingPacketQueueDepth = 512
 
+// TCP buffer ranges for the gVisor stack. Min and Default match gVisor's own
+// defaults; Max is raised from 4 MiB to 8 MiB to cover high-BDP single flows
+// (e.g. ~500 Mbps × 80 ms ≈ 5 MB). Buffers only grow on demand via
+// auto-tuning, so idle flows stay at Default.
+const (
+	tcpMinBufferSize     = 4 << 10 // 4 KiB
+	tcpDefaultBufferSize = 1 << 20 // 1 MiB
+	tcpMaxBufferSize     = 8 << 20 // 8 MiB
+)
+
 type netTun struct {
 	ep             *channel.Endpoint
 	stack          *stack.Stack
@@ -81,6 +93,31 @@ func CreateNetTUN(localAddresses, dnsServers []netip.Addr, mtu int) (tun.Device,
 	tcpipErr := dev.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &sackEnabledOpt)
 	if tcpipErr != nil {
 		return nil, nil, fmt.Errorf("could not enable TCP SACK: %v", tcpipErr)
+	}
+	// Raise the buffer ceiling so a single high-BDP flow is not pinned at the
+	// 1 MiB default (≈100-160 Mbps at WARP's 50-100 ms RTT). Send and receive
+	// buffers both auto-tune toward Max, so only Max is raised.
+	sndBufOpt := tcpip.TCPSendBufferSizeRangeOption{Min: tcpMinBufferSize, Default: tcpDefaultBufferSize, Max: tcpMaxBufferSize}
+	if tcpipErr := dev.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &sndBufOpt); tcpipErr != nil {
+		return nil, nil, fmt.Errorf("could not set TCP send buffer range: %v", tcpipErr)
+	}
+	rcvBufOpt := tcpip.TCPReceiveBufferSizeRangeOption{Min: tcpMinBufferSize, Default: tcpDefaultBufferSize, Max: tcpMaxBufferSize}
+	if tcpipErr := dev.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &rcvBufOpt); tcpipErr != nil {
+		return nil, nil, fmt.Errorf("could not set TCP receive buffer range: %v", tcpipErr)
+	}
+	// Receive buffer auto-tuning is off by default; without it the receive
+	// window never grows past Default regardless of Max.
+	moderateRcvBufOpt := tcpip.TCPModerateReceiveBufferOption(true)
+	if tcpipErr := dev.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &moderateRcvBufOpt); tcpipErr != nil {
+		return nil, nil, fmt.Errorf("could not enable TCP receive buffer moderation: %v", tcpipErr)
+	}
+	ccOpt := tcpip.CongestionControlOption("cubic") // gVisor defaults to reno
+	if tcpipErr := dev.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &ccOpt); tcpipErr != nil {
+		return nil, nil, fmt.Errorf("could not set TCP congestion control: %v", tcpipErr)
+	}
+	delayOpt := tcpip.TCPDelayEnabled(false) // disable Nagle: this is a proxy hop
+	if tcpipErr := dev.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &delayOpt); tcpipErr != nil {
+		return nil, nil, fmt.Errorf("could not disable TCP delay: %v", tcpipErr)
 	}
 	dev.notifyHandle = dev.ep.AddNotify(dev)
 	tcpipErr = dev.stack.CreateNIC(1, dev.ep)
