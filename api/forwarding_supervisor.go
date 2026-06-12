@@ -218,7 +218,7 @@ func (s *forwardingSupervisor) runDeviceToIP() {
 			select {
 			case s.icmpCh <- icmp:
 			default:
-				slog.Debug("dropping ICMP packet: injector queue full")
+				slog.Warn("dropping ICMP packet: injector queue full")
 			}
 		}
 	}
