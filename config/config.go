@@ -341,8 +341,16 @@ func GetDefaultSocksConfig() SocksConfig {
 		BlockUDP443:          true,
 		SNIAddress:           "", // 这应当从internal.ConnectSNI读取，但现在我们不修改其他文件
 		KeepalivePeriod:      Duration(30 * time.Second),
-		MTU:                  1280,
-		InitialPacketSize:    1242,
+		// MTU is the inner (tunneled) packet size. 1280 is the safe default;
+		// values up to ~1400 are supported — oversized packets are clamped back
+		// by the connect-ip ICMP packet-too-big response, which always
+		// advertises 1280.
+		MTU: 1280,
+		// InitialPacketSize seeds quic-go's path MTU discovery, which probes
+		// upward from here. 1242 is the empirically measured Cloudflare Initial
+		// packet size (see RESEARCH.md) and remains the safe floor; 1350 stays
+		// below the common ~1400 PPPoE/tunnel cliff while shortening probing.
+		InitialPacketSize: 1350,
 		ReconnectDelay:       Duration(1 * time.Second),
 		MaxReconnectAttempts: 0,
 		DrainGrace:           Duration(15 * time.Second),

@@ -43,8 +43,8 @@ These fields only affect `uscf proxy`. WG mode runs `uscf socks`, so it logs and
 | `socks.block_udp_443` | Reject outbound UDP/443 through the SOCKS proxy. |
 | `socks.sni_address` | MASQUE TLS SNI override. Leave empty unless you know why it is needed. |
 | `socks.keepalive_period` | QUIC keepalive period. |
-| `socks.mtu` | Netstack TUN MTU. |
-| `socks.initial_packet_size` | Initial QUIC packet size. |
+| `socks.mtu` | Netstack TUN (inner) MTU. Default `1280`; values up to `1400` are supported — oversized packets are clamped back to 1280 via ICMP packet-too-big. |
+| `socks.initial_packet_size` | Initial QUIC packet size; seeds path MTU discovery, which probes upward from here. Default `1350` (the measured Cloudflare floor is `1242`). |
 | `socks.reconnect_delay` | Initial reconnect delay. |
 | `socks.max_reconnect_attempts` | Pause after this many consecutive failures. `0` means unlimited retry. |
 | `socks.drain_grace` | Keep existing SOCKS connections open during short tunnel outages; if the tunnel is still down after this duration, active SOCKS connections are drained. |

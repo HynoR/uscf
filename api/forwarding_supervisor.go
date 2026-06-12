@@ -56,10 +56,15 @@ type forwardingSupervisor struct {
 	wg        sync.WaitGroup
 }
 
+// fallbackBufferSize sizes the packet buffers when no pool is supplied (test
+// paths). Sized to a full Ethernet MTU so it can never truncate a tunneled
+// packet even with a raised inner MTU.
+const fallbackBufferSize = 1500
+
 func newForwardingSupervisor(parentCtx context.Context, device TunnelDevice, bufPool *NetBuffer) *forwardingSupervisor {
 	ctx, cancel := context.WithCancel(parentCtx)
 	if bufPool == nil {
-		bufPool = NewNetBuffer(1280)
+		bufPool = NewNetBuffer(fallbackBufferSize)
 	}
 	s := &forwardingSupervisor{
 		ctx:     ctx,

@@ -1000,12 +1000,25 @@ func getTimeoutSettings(cmd *cobra.Command) (time.Duration, time.Duration) {
 	return connectionTimeout, idleTimeout
 }
 
+// mtuWarning returns a warning for MTU values outside the supported range.
+// 1280-1400 is silent: the connect-ip ICMP packet-too-big safety net (which
+// always advertises 1280) lets TCP recover if the path turns out smaller.
+func mtuWarning(mtu int) (string, bool) {
+	switch {
+	case mtu < 1280:
+		return "MTU below 1280 may break IPv6 and cause path-MTU issues", true
+	case mtu > 1400:
+		return "MTU above 1400 will likely exceed the QUIC datagram size and be clamped back to 1280 by ICMP packet-too-big", true
+	}
+	return "", false
+}
+
 // createTunDevice 创建TUN设备
 func createTunDevice(localAddresses, dnsAddrs []netip.Addr, cmd *cobra.Command) (tun.Device, *netstack.Net, error) {
 	// 从配置中获取MTU
 	mtu := config.AppConfig.Socks.MTU
-	if mtu != 1280 {
-		slog.Warn("MTU is not default 1280; packet loss or other issues may occur", "mtu", mtu)
+	if msg, warn := mtuWarning(mtu); warn {
+		slog.Warn(msg, "mtu", mtu)
 	}
 
 	tunDev, tunNet, err := netstack.CreateNetTUN(localAddresses, dnsAddrs, mtu)
