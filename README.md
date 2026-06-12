@@ -36,6 +36,16 @@ Preview tags are maintainer-facing only:
 
 Most customer deployments should use Docker.
 
+### Interactive Docker Deployment
+
+For users who do not want to hand-write Docker parameters, run the interactive script:
+
+```bash
+sh deploy-docker.sh
+```
+
+The script asks for the Docker image repository, tag, deployment mode (`masque` or `wg`), account mode, SOCKS5 bind/port/auth settings, and IPv6 preference. Stable tags are `latest` and `wg-latest`; testing tags are `dev` and `wg-dev`. You can also enter a custom tag for testing other versions. Account mode defaults to a normal free account. Choose the Team JWT or WARP+ key option only when you want to upgrade the account during deployment.
+
 Create a persistent config directory:
 
 ```bash
