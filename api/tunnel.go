@@ -168,8 +168,9 @@ type ConnectionConfig struct {
 	TLSConfig            *tls.Config
 	KeepAlivePeriod      time.Duration
 	InitialPacketSize    uint16
-	Endpoint             *net.UDPAddr
-	EndpointSelector     func() *net.UDPAddr // Optional endpoint selector invoked for each connection attempt.
+	Endpoint             net.Addr
+	EndpointSelector     func() net.Addr // Optional endpoint selector invoked for each connection attempt.
+	UseHTTP2             bool
 	MTU                  int
 	MaxReconnectAttempts int // 连续连接失败达到阈值后暂停重连；0表示无限重试
 	ReconnectStrategy    BackoffStrategy
@@ -252,14 +253,25 @@ func handleConnectionWithForwarding(ctx context.Context, config ConnectionConfig
 			endpoint = selected
 		}
 	}
-	if endpoint == nil || endpoint.IP == nil {
+	if endpoint == nil {
 		return reconnectAttempt + 1, fmt.Errorf("no endpoint configured for tunnel connection")
+	}
+	if config.UseHTTP2 {
+		if _, ok := endpoint.(*net.TCPAddr); !ok {
+			return reconnectAttempt + 1, fmt.Errorf("HTTP/2 mode requires a TCP endpoint, got %T", endpoint)
+		}
+	} else {
+		if _, ok := endpoint.(*net.UDPAddr); !ok {
+			return reconnectAttempt + 1, fmt.Errorf("HTTP/3 mode requires a UDP endpoint, got %T", endpoint)
+		}
 	}
 
 	slog.Info(
 		"establishing MASQUE connection",
 		"endpoint",
-		fmt.Sprintf("%s:%d", endpoint.IP, endpoint.Port),
+		endpoint.String(),
+		"transport",
+		tunnelTransportLabel(config.UseHTTP2),
 		"attempt",
 		reconnectAttempt+1,
 	)
@@ -270,6 +282,7 @@ func handleConnectionWithForwarding(ctx context.Context, config ConnectionConfig
 		internal.DefaultQuicConfig(config.KeepAlivePeriod, config.InitialPacketSize),
 		internal.ConnectURI,
 		endpoint,
+		config.UseHTTP2,
 	)
 
 	if err != nil {
@@ -315,6 +328,13 @@ func handleConnectionWithForwarding(ctx context.Context, config ConnectionConfig
 	case <-ctx.Done():
 		return 0, ctx.Err()
 	}
+}
+
+func tunnelTransportLabel(useHTTP2 bool) string {
+	if useHTTP2 {
+		return "http2"
+	}
+	return "http3"
 }
 
 func MaintainTunnel(ctx context.Context, config ConnectionConfig, device TunnelDevice) {

@@ -12,7 +12,6 @@ import (
 
 	connectip "github.com/Diniboy1123/connect-ip-go"
 	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/http3"
 )
 
 type staticBackoff struct {
@@ -40,8 +39,9 @@ func TestMaintainTunnelPausesAfterMaxReconnectAttempts(t *testing.T) {
 		tlsConfig *tls.Config,
 		quicConfig *quic.Config,
 		connectURI string,
-		endpoint *net.UDPAddr,
-	) (*net.UDPConn, *http3.Transport, *connectip.Conn, *http.Response, error) {
+		endpoint net.Addr,
+		useHTTP2 bool,
+	) (*net.UDPConn, tunnelTransport, *connectip.Conn, *http.Response, error) {
 		attempts.Add(1)
 		return nil, nil, nil, nil, errors.New("connect failed")
 	}
@@ -92,8 +92,9 @@ func TestMaintainTunnelUnlimitedRetriesWhenMaxIsZero(t *testing.T) {
 		tlsConfig *tls.Config,
 		quicConfig *quic.Config,
 		connectURI string,
-		endpoint *net.UDPAddr,
-	) (*net.UDPConn, *http3.Transport, *connectip.Conn, *http.Response, error) {
+		endpoint net.Addr,
+		useHTTP2 bool,
+	) (*net.UDPConn, tunnelTransport, *connectip.Conn, *http.Response, error) {
 		attempts.Add(1)
 		return nil, nil, nil, nil, errors.New("connect failed")
 	}
@@ -137,8 +138,9 @@ func TestMaintainTunnelLazyReconnectWaitsForDemand(t *testing.T) {
 		tlsConfig *tls.Config,
 		quicConfig *quic.Config,
 		connectURI string,
-		endpoint *net.UDPAddr,
-	) (*net.UDPConn, *http3.Transport, *connectip.Conn, *http.Response, error) {
+		endpoint net.Addr,
+		useHTTP2 bool,
+	) (*net.UDPConn, tunnelTransport, *connectip.Conn, *http.Response, error) {
 		connects.Add(1)
 		return nil, nil, nil, &http.Response{StatusCode: http.StatusOK, Status: "200 OK"}, nil
 	}

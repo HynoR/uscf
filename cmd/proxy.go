@@ -89,6 +89,7 @@ func init() {
 	proxyCmd.Flags().StringP("username", "u", "", "Username for SOCKS5 proxy authentication (overrides config file)")
 	proxyCmd.Flags().StringP("password", "w", "", "Password for SOCKS5 proxy authentication (overrides config file)")
 	proxyCmd.Flags().Bool("use-ipv6", false, "Use IPv6 for MASQUE connection (overrides config file)")
+	proxyCmd.Flags().Bool("http2", false, "Use HTTP/2 over TCP+TLS instead of HTTP/3 over QUIC (overrides config file)")
 
 	// 添加提示，说明SOCKS配置已移至配置文件，但可通过命令行参数覆盖
 	proxyCmd.Long += "\n\nNote: All SOCKS proxy settings are primarily managed through the config file, but can be overridden with command-line flags."
@@ -231,6 +232,13 @@ func applySocksFlagOverrides(cmd *cobra.Command, cfg *config.Config) bool {
 		useIPv6, _ := cmd.Flags().GetBool("use-ipv6")
 		slog.Info("overriding use_ipv6 from command line", "use_ipv6", useIPv6)
 		cfg.Socks.UseIPv6 = useIPv6
+		configChanged = true
+	}
+
+	if cmd.Flags().Changed("http2") {
+		useHTTP2, _ := cmd.Flags().GetBool("http2")
+		slog.Info("overriding http2 from command line", "http2", useHTTP2)
+		cfg.Socks.HTTP2 = useHTTP2
 		configChanged = true
 	}
 
@@ -753,6 +761,69 @@ func udpAddrFromHost(host string, port int, useIPv6 bool) (*net.UDPAddr, error) 
 	return &net.UDPAddr{IP: ip, Port: port}, nil
 }
 
+func tcpAddrFromHost(host string, port int, useIPv6 bool) (*net.TCPAddr, error) {
+	normalizedHost, err := parseEndpointHost(host)
+	if err != nil {
+		return nil, err
+	}
+	ip := net.ParseIP(normalizedHost)
+	if ip == nil {
+		return nil, fmt.Errorf("invalid endpoint IP: %q", normalizedHost)
+	}
+	if useIPv6 && ip.To4() != nil {
+		return nil, fmt.Errorf("expected IPv6 endpoint, got IPv4: %s", normalizedHost)
+	}
+	if !useIPv6 && ip.To4() == nil {
+		return nil, fmt.Errorf("expected IPv4 endpoint, got IPv6: %s", normalizedHost)
+	}
+
+	return &net.TCPAddr{IP: ip, Port: port}, nil
+}
+
+func selectMasqueEndpoint(port int, useIPv6 bool, useHTTP2 bool) (net.Addr, func() net.Addr, error) {
+	if useHTTP2 {
+		h2Host := strings.TrimSpace(config.AppConfig.EndpointH2V4)
+		if useIPv6 {
+			h2Host = strings.TrimSpace(config.AppConfig.EndpointH2V6)
+			if h2Host == "" {
+				return nil, nil, fmt.Errorf("http2 with use_ipv6 requires endpoint_h2_v6")
+			}
+		} else if h2Host == "" {
+			h2Host = config.DefaultEndpointH2V4
+		}
+
+		endpoint, err := tcpAddrFromHost(h2Host, port, useIPv6)
+		if err != nil {
+			return nil, nil, err
+		}
+		slog.Info("HTTP/2 TCP fallback enabled", "endpoint", endpoint.String(), "family", familyLabel(useIPv6))
+		return endpoint, nil, nil
+	}
+
+	fallbackHost := config.AppConfig.EndpointV4
+	customHosts := config.AppConfig.CustomEndpointsV4
+	if useIPv6 {
+		fallbackHost = config.AppConfig.EndpointV6
+		customHosts = config.AppConfig.CustomEndpointsV6
+	}
+
+	fallbackEndpoint, err := udpAddrFromHost(fallbackHost, port, useIPv6)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	candidateEndpoints := buildCustomEndpointPool(customHosts, port, useIPv6)
+	if len(candidateEndpoints) > 0 {
+		slog.Info("custom endpoint pool enabled", "family", familyLabel(useIPv6), "count", len(candidateEndpoints))
+		return fallbackEndpoint, newEndpointSelector(candidateEndpoints), nil
+	}
+	if len(customHosts) > 0 {
+		slog.Warn("custom endpoint list configured but no valid entries; using fallback endpoint", "family", familyLabel(useIPv6))
+	}
+
+	return fallbackEndpoint, nil, nil
+}
+
 func buildCustomEndpointPool(customHosts []string, port int, useIPv6 bool) []*net.UDPAddr {
 	candidates := make([]*net.UDPAddr, 0, len(customHosts))
 	seen := make(map[string]struct{})
@@ -779,7 +850,7 @@ func buildCustomEndpointPool(customHosts []string, port int, useIPv6 bool) []*ne
 	return candidates
 }
 
-func newEndpointSelector(candidates []*net.UDPAddr) func() *net.UDPAddr {
+func newEndpointSelector(candidates []*net.UDPAddr) func() net.Addr {
 	if len(candidates) == 0 {
 		return nil
 	}
@@ -787,7 +858,7 @@ func newEndpointSelector(candidates []*net.UDPAddr) func() *net.UDPAddr {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	var mu sync.Mutex
 
-	return func() *net.UDPAddr {
+	return func() net.Addr {
 		mu.Lock()
 		idx := rng.Intn(len(candidates))
 		selected := candidates[idx]
@@ -926,30 +997,15 @@ func prepareTlsConfig(cmd *cobra.Command) (*tls.Config, error) {
 }
 
 // prepareNetworkConfig 准备网络配置
-func prepareNetworkConfig(cmd *cobra.Command) (*net.UDPAddr, func() *net.UDPAddr, []netip.Addr, []netip.Addr, error) {
+func prepareNetworkConfig(cmd *cobra.Command) (net.Addr, func() net.Addr, []netip.Addr, []netip.Addr, error) {
 	// 从配置文件获取连接端口
 	connectPort := config.AppConfig.Socks.ConnectPort
 
 	useIPv6 := config.AppConfig.Socks.UseIPv6
-	fallbackHost := config.AppConfig.EndpointV4
-	customHosts := config.AppConfig.CustomEndpointsV4
-	if useIPv6 {
-		fallbackHost = config.AppConfig.EndpointV6
-		customHosts = config.AppConfig.CustomEndpointsV6
-	}
-
-	fallbackEndpoint, err := udpAddrFromHost(fallbackHost, connectPort, useIPv6)
+	useHTTP2 := config.AppConfig.Socks.HTTP2
+	fallbackEndpoint, endpointSelector, err := selectMasqueEndpoint(connectPort, useIPv6, useHTTP2)
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("failed to parse fallback endpoint: %w", err)
-	}
-
-	candidateEndpoints := buildCustomEndpointPool(customHosts, connectPort, useIPv6)
-	var endpointSelector func() *net.UDPAddr
-	if len(candidateEndpoints) > 0 {
-		endpointSelector = newEndpointSelector(candidateEndpoints)
-		slog.Info("custom endpoint pool enabled", "family", familyLabel(useIPv6), "count", len(candidateEndpoints))
-	} else if len(customHosts) > 0 {
-		slog.Warn("custom endpoint list configured but no valid entries; using fallback endpoint", "family", familyLabel(useIPv6))
 	}
 
 	// 隧道内IP设置
@@ -1029,7 +1085,7 @@ func createTunDevice(localAddresses, dnsAddrs []netip.Addr, cmd *cobra.Command) 
 }
 
 // startTunnel 配置并启动隧道连接
-func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint *net.UDPAddr, endpointSelector func() *net.UDPAddr, tunDev tun.Device, tunNet *netstack.Net, socksRuntime *socksRuntime) <-chan struct{} {
+func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint net.Addr, endpointSelector func() net.Addr, tunDev tun.Device, tunNet *netstack.Net, socksRuntime *socksRuntime) <-chan struct{} {
 	readyCh := make(chan struct{})
 	var readyOnce sync.Once
 	writeTunnelStateSafe(tunnelStateDown)
@@ -1048,6 +1104,7 @@ func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint *net.UDPAdd
 		InitialPacketSize:      initialPacketSize,
 		Endpoint:               endpoint,
 		EndpointSelector:       endpointSelector,
+		UseHTTP2:               config.AppConfig.Socks.HTTP2,
 		MTU:                    mtu,
 		MaxReconnectAttempts:   maxReconnectAttempts,
 		AlwaysReconnect:        config.AppConfig.Socks.AlwaysReconnect,

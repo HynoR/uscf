@@ -33,18 +33,20 @@ These fields only affect `uscf proxy`. WG mode runs `uscf socks`, so it logs and
 
 | Field | Purpose |
 |---|---|
-| `custom_endpoints_v4` / `custom_endpoints_v6` | Optional MASQUE endpoint pools. If valid entries exist for the selected IP family, one is chosen randomly on reconnect. |
+| `endpoint_h2_v4` / `endpoint_h2_v6` | Optional HTTP/2 TCP fallback endpoints. IPv4 defaults to `162.159.198.2` when empty; IPv6 must be set explicitly when `socks.http2` and `socks.use_ipv6` are both true. |
+| `custom_endpoints_v4` / `custom_endpoints_v6` | Optional HTTP/3 MASQUE endpoint pools. If valid entries exist for the selected IP family, one is chosen randomly on reconnect. Not used by HTTP/2 mode. |
 | `socks.use_ipv6` | Use IPv6 endpoint and custom IPv6 endpoint pool for MASQUE connection. |
-| `socks.connect_port` | MASQUE endpoint UDP port. |
+| `socks.http2` | Use TCP+TLS+HTTP/2 for the MASQUE connection instead of QUIC+HTTP/3. CLI override: `uscf proxy --http2`. |
+| `socks.connect_port` | MASQUE endpoint port. Used as UDP port in HTTP/3 mode and TCP port in HTTP/2 mode. |
 | `socks.dns` | DNS servers used by local or tunnel DNS resolver. |
 | `socks.dns_timeout` | Per-DNS-query timeout. |
 | `socks.remote_dns` | Resolve through the tunnel instead of local DNS. |
 | `socks.no_tunnel_ipv4` / `socks.no_tunnel_ipv6` | Disable an IP family inside the MASQUE tunnel. |
 | `socks.block_udp_443` | Reject outbound UDP/443 through the SOCKS proxy. |
 | `socks.sni_address` | MASQUE TLS SNI override. Leave empty unless you know why it is needed. |
-| `socks.keepalive_period` | QUIC keepalive period. |
+| `socks.keepalive_period` | QUIC keepalive period. Only applies to HTTP/3 mode. |
 | `socks.mtu` | Netstack TUN (inner) MTU. Default `1280`; values up to `1400` are supported — oversized packets are clamped back to 1280 via ICMP packet-too-big. |
-| `socks.initial_packet_size` | Initial QUIC packet size; seeds path MTU discovery, which probes upward from here. Default `1350` (the measured Cloudflare floor is `1242`). |
+| `socks.initial_packet_size` | Initial QUIC packet size; seeds path MTU discovery, which probes upward from here. Default `1350` (the measured Cloudflare floor is `1242`). Only applies to HTTP/3 mode. |
 | `socks.reconnect_delay` | Initial reconnect delay. |
 | `socks.max_reconnect_attempts` | Pause after this many consecutive failures. `0` means unlimited retry. |
 | `socks.drain_grace` | Keep existing SOCKS connections open during short tunnel outages; if the tunnel is still down after this duration, active SOCKS connections are drained. |
@@ -74,7 +76,7 @@ Use `bypass_domain` when only a few domains should avoid the tunnel. Use `proxy_
 | Field | Purpose |
 |---|---|
 | `private_key` | MASQUE ECDSA private key |
-| `endpoint_v4` / `endpoint_v6` | Cloudflare MASQUE endpoint hosts |
+| `endpoint_v4` / `endpoint_v6` | Cloudflare MASQUE HTTP/3 endpoint hosts |
 | `endpoint_pub_key` | Endpoint public key used for pinning |
 | `account_mode` | `free`, `premium`, or `team` |
 | `license` | Account license value returned by Cloudflare |

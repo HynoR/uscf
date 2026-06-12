@@ -13,4 +13,7 @@ func TestDefaultPacketSizing(t *testing.T) {
 	if defaults.InitialPacketSize != 1350 {
 		t.Errorf("default InitialPacketSize = %d, want 1350", defaults.InitialPacketSize)
 	}
+	if defaults.HTTP2 {
+		t.Errorf("default HTTP2 = true, want false")
+	}
 }

@@ -1,4 +1,6 @@
 {
+  "endpoint_h2_v4": "162.159.198.2",
+  "endpoint_h2_v6": "",
   "custom_endpoints_v4": [],
   "custom_endpoints_v6": [],
   "socks": {
@@ -18,6 +20,7 @@
     "dns_timeout": "2s",
     "remote_dns": false,
     "use_ipv6": false,
+    "http2": false,
     "no_tunnel_ipv4": false,
     "no_tunnel_ipv6": false,
     "block_udp_443": true,

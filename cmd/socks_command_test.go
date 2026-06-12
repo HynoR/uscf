@@ -267,13 +267,14 @@ func TestIgnoredSocksOnlySettingsIncludesTunnelSpecificOptions(t *testing.T) {
 			BlockUDP443:  true,
 			RemoteDNS:    true,
 			UseIPv6:      true,
+			HTTP2:        true,
 		},
 	}
 
 	ignored := ignoredSocksOnlySettings(cfg)
 	joined := strings.Join(ignored, ",")
 
-	for _, needle := range []string{"private_key", "endpoint_v4", "endpoint_pub_key", "bypass_domain", "proxy_tcp_port", "dns", "block_udp_443", "remote_dns", "use_ipv6"} {
+	for _, needle := range []string{"private_key", "endpoint_v4", "endpoint_pub_key", "bypass_domain", "proxy_tcp_port", "dns", "block_udp_443", "remote_dns", "use_ipv6", "http2"} {
 		if !strings.Contains(joined, needle) {
 			t.Fatalf("ignored settings missing %q: %v", needle, ignored)
 		}

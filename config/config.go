@@ -55,6 +55,8 @@ type Config struct {
 	PrivateKey        string   `json:"private_key"`         // Base64-encoded ECDSA private key
 	EndpointV4        string   `json:"endpoint_v4"`         // IPv4 address of the endpoint
 	EndpointV6        string   `json:"endpoint_v6"`         // IPv6 address of the endpoint
+	EndpointH2V4      string   `json:"endpoint_h2_v4"`      // IPv4 address used in HTTP/2 mode
+	EndpointH2V6      string   `json:"endpoint_h2_v6"`      // IPv6 address used in HTTP/2 mode
 	CustomEndpointsV4 []string `json:"custom_endpoints_v4"` // Optional IPv4 endpoint pool used by runtime
 	CustomEndpointsV6 []string `json:"custom_endpoints_v6"` // Optional IPv6 endpoint pool used by runtime
 	EndpointPubKey    string   `json:"endpoint_pub_key"`    // PEM-encoded ECDSA public key of the endpoint to verify against
@@ -94,6 +96,8 @@ type KeyConfig struct {
 
 // PublicConfig 包含可复用的通用运行配置，存储于 config.json。
 type PublicConfig struct {
+	EndpointH2V4      string           `json:"endpoint_h2_v4"`
+	EndpointH2V6      string           `json:"endpoint_h2_v6"`
 	CustomEndpointsV4 []string         `json:"custom_endpoints_v4"`
 	CustomEndpointsV6 []string         `json:"custom_endpoints_v6"`
 	Socks             SocksConfig      `json:"socks"`
@@ -121,6 +125,7 @@ type SocksConfig struct {
 	DNSTimeout           Duration `json:"dns_timeout"`            // DNS查询超时时间（超时后尝试下一个服务器）
 	RemoteDNS            bool     `json:"remote_dns"`             // 是否使用远程DNS（通过TUN隧道），false则使用本地DNS
 	UseIPv6              bool     `json:"use_ipv6"`               // 是否使用IPv6进行MASQUE连接
+	HTTP2                bool     `json:"http2"`                  // true=TCP+TLS+HTTP/2; false=QUIC+HTTP/3
 	NoTunnelIPv4         bool     `json:"no_tunnel_ipv4"`         // 是否在MASQUE隧道内禁用IPv4
 	NoTunnelIPv6         bool     `json:"no_tunnel_ipv6"`         // 是否在MASQUE隧道内禁用IPv6
 	BlockUDP443          bool     `json:"block_udp_443"`          // Whether to block outbound UDP/443 (QUIC)
@@ -180,6 +185,11 @@ var AppConfig Config
 // ConfigLoaded indicates whether the configuration has been successfully loaded.
 var ConfigLoaded bool
 
+const (
+	DefaultEndpointH2V4 = "162.159.198.2"
+	DefaultEndpointH2V6 = ""
+)
+
 // LoadConfig loads the application configuration from a JSON file.
 //
 // Parameters:
@@ -205,6 +215,8 @@ func LoadConfig(configPath string) error {
 	}
 
 	AppConfig = Config{
+		EndpointH2V4:      legacy.EndpointH2V4,
+		EndpointH2V6:      legacy.EndpointH2V6,
 		CustomEndpointsV4: append([]string(nil), legacy.CustomEndpointsV4...),
 		CustomEndpointsV6: append([]string(nil), legacy.CustomEndpointsV6...),
 		Socks:             legacy.Socks,
@@ -287,6 +299,8 @@ func LoadPublicConfig(configPath string) error {
 	}
 
 	AppConfig = Config{
+		EndpointH2V4:      public.EndpointH2V4,
+		EndpointH2V6:      public.EndpointH2V6,
 		CustomEndpointsV4: append([]string(nil), public.CustomEndpointsV4...),
 		CustomEndpointsV6: append([]string(nil), public.CustomEndpointsV6...),
 		Socks:             public.Socks,
@@ -325,22 +339,23 @@ func LoadPublicConfig(configPath string) error {
 // GetDefaultSocksConfig 返回默认的SOCKS代理配置
 func GetDefaultSocksConfig() SocksConfig {
 	return SocksConfig{
-		BindAddress:          "127.0.0.1",
-		Port:                 "1080",
-		Username:             "",
-		Password:             "",
-		BypassDomain:         []string{},
-		ProxyTCPPort:         []int{},
-		ConnectPort:          443,
-		DNS:                  []string{"1.1.1.1", "8.8.8.8"},
-		DNSTimeout:           Duration(2 * time.Second),
-		RemoteDNS:            false,
-		UseIPv6:              false,
-		NoTunnelIPv4:         false,
-		NoTunnelIPv6:         false,
-		BlockUDP443:          true,
-		SNIAddress:           "", // 这应当从internal.ConnectSNI读取，但现在我们不修改其他文件
-		KeepalivePeriod:      Duration(30 * time.Second),
+		BindAddress:     "127.0.0.1",
+		Port:            "1080",
+		Username:        "",
+		Password:        "",
+		BypassDomain:    []string{},
+		ProxyTCPPort:    []int{},
+		ConnectPort:     443,
+		DNS:             []string{"1.1.1.1", "8.8.8.8"},
+		DNSTimeout:      Duration(2 * time.Second),
+		RemoteDNS:       false,
+		UseIPv6:         false,
+		NoTunnelIPv4:    false,
+		NoTunnelIPv6:    false,
+		BlockUDP443:     true,
+		HTTP2:           false,
+		SNIAddress:      "", // 这应当从internal.ConnectSNI读取，但现在我们不修改其他文件
+		KeepalivePeriod: Duration(30 * time.Second),
 		// MTU is the inner (tunneled) packet size. 1280 is the safe default;
 		// values up to ~1400 are supported — oversized packets are clamped back
 		// by the connect-ip ICMP packet-too-big response, which always
@@ -350,7 +365,7 @@ func GetDefaultSocksConfig() SocksConfig {
 		// upward from here. 1242 is the empirically measured Cloudflare Initial
 		// packet size (see RESEARCH.md) and remains the safe floor; 1350 stays
 		// below the common ~1400 PPPoE/tunnel cliff while shortening probing.
-		InitialPacketSize: 1350,
+		InitialPacketSize:    1350,
 		ReconnectDelay:       Duration(1 * time.Second),
 		MaxReconnectAttempts: 0,
 		DrainGrace:           Duration(15 * time.Second),
@@ -515,6 +530,8 @@ func extractKeyConfig(cfg Config) KeyConfig {
 
 func extractPublicConfig(cfg Config) PublicConfig {
 	return PublicConfig{
+		EndpointH2V4:      cfg.EndpointH2V4,
+		EndpointH2V6:      cfg.EndpointH2V6,
 		CustomEndpointsV4: append([]string(nil), cfg.CustomEndpointsV4...),
 		CustomEndpointsV6: append([]string(nil), cfg.CustomEndpointsV6...),
 		Socks:             cfg.Socks,
@@ -591,6 +608,8 @@ func InitNewConfig(
 		PrivateKey:     privateKey,
 		EndpointV4:     endpointV4,
 		EndpointV6:     endpointV6,
+		EndpointH2V4:   DefaultEndpointH2V4,
+		EndpointH2V6:   DefaultEndpointH2V6,
 		EndpointPubKey: endpointPubKey,
 		License:        license,
 		ID:             id,
