@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 
 	connectip "github.com/Diniboy1123/connect-ip-go"
 	"github.com/quic-go/quic-go"
@@ -140,7 +141,9 @@ func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.
 	template := uritemplate.MustNew(connectUri)
 	ipConn, rsp, err := connectip.Dial(ctx, hconn, template, "cf-connect-ip", additionalHeaders, true)
 	if err != nil {
-		if err.Error() == "CRYPTO_ERROR 0x131 (remote): tls: access denied" {
+		_ = tr.Close()
+		_ = conn.CloseWithError(0, "connect-ip dial failed")
+		if strings.Contains(err.Error(), "tls: access denied") {
 			return udpConn, nil, nil, nil, errors.New("login failed! Please double-check if your tls key and cert is enrolled in the Cloudflare Access service")
 		}
 		return udpConn, nil, nil, nil, fmt.Errorf("failed to dial connect-ip: %v", err)
