@@ -183,66 +183,64 @@ func runProxyCmd(cmd *cobra.Command, args []string) error {
 	}
 
 	// 检查并应用命令行参数覆盖配置文件的值
-	configChanged := applySocksFlagOverrides(cmd, &config.AppConfig)
+	configChanged, flagOverrides := applySocksFlagOverrides(cmd, &config.AppConfig)
 
-	// 如果配置有变更，保存到配置文件
 	if configChanged {
-		slog.Info("saving updated configuration", "path", configPath)
 		if err := config.AppConfig.SaveConfig(configPath); err != nil {
-			slog.Warn("failed to save updated config", "path", configPath, "error", err)
+			slog.Warn("config save failed", "path", configPath, "error", err)
 		}
 	}
 
-	// 2. 启动 SOCKS5 代理
-	if err := setupAndRunSocksProxy(cmd); err != nil {
+	if err := setupAndRunSocksProxy(cmd, flagOverrides, configChanged); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func applySocksFlagOverrides(cmd *cobra.Command, cfg *config.Config) bool {
+func applySocksFlagOverrides(cmd *cobra.Command, cfg *config.Config) (bool, []string) {
 	configChanged := false
+	var overrides []string
 
 	if bindAddress, _ := cmd.Flags().GetString("bind-address"); bindAddress != "" {
-		slog.Info("overriding bind address from command line", "bind_address", bindAddress)
 		cfg.Socks.BindAddress = bindAddress
 		configChanged = true
+		overrides = append(overrides, "bind_address")
 	}
 
 	if port, _ := cmd.Flags().GetString("port"); port != "" {
-		slog.Info("overriding port from command line", "port", port)
 		cfg.Socks.Port = port
 		configChanged = true
+		overrides = append(overrides, "port")
 	}
 
 	if username, _ := cmd.Flags().GetString("username"); username != "" {
-		slog.Info("overriding username from command line")
 		cfg.Socks.Username = username
 		configChanged = true
+		overrides = append(overrides, "username")
 	}
 
 	if password, _ := cmd.Flags().GetString("password"); password != "" {
-		slog.Info("overriding password from command line")
 		cfg.Socks.Password = password
 		configChanged = true
+		overrides = append(overrides, "password")
 	}
 
 	if cmd.Flags().Changed("use-ipv6") {
 		useIPv6, _ := cmd.Flags().GetBool("use-ipv6")
-		slog.Info("overriding use_ipv6 from command line", "use_ipv6", useIPv6)
 		cfg.Socks.UseIPv6 = useIPv6
 		configChanged = true
+		overrides = append(overrides, "use_ipv6")
 	}
 
 	if cmd.Flags().Changed("http2") {
 		useHTTP2, _ := cmd.Flags().GetBool("http2")
-		slog.Info("overriding http2 from command line", "http2", useHTTP2)
 		cfg.Socks.HTTP2 = useHTTP2
 		configChanged = true
+		overrides = append(overrides, "http2")
 	}
 
-	return configChanged
+	return configChanged, overrides
 }
 
 func jwtFilePathFromConfigPath(configPath string) string {
@@ -924,10 +922,26 @@ func newLocalDNSResolver() (api.NameResolver, error) {
 	}, nil
 }
 
-// setupAndRunSocksProxy 设置并运行SOCKS5代理
-func setupAndRunSocksProxy(cmd *cobra.Command) error {
-	slog.Info("preparing SOCKS5 proxy")
+type socksRuntimeMeta struct {
+	dnsMode        string
+	bypassDomains  int
+	proxyTCPPorts  int
+	blockUDP443    bool
+}
 
+type proxyReadyInfo struct {
+	endpoint          net.Addr
+	endpointSelector  func() net.Addr
+	useHTTP2          bool
+	connectionTimeout time.Duration
+	overrides         []string
+	configSaved       bool
+	socksOnly         bool
+	meta              socksRuntimeMeta
+}
+
+// setupAndRunSocksProxy 设置并运行SOCKS5代理
+func setupAndRunSocksProxy(cmd *cobra.Command, overrides []string, configSaved bool) error {
 	// 准备TLS配置
 	tlsConfig, err := prepareTlsConfig(cmd)
 	if err != nil {
@@ -950,21 +964,24 @@ func setupAndRunSocksProxy(cmd *cobra.Command) error {
 	}
 	defer tunDev.Close()
 
-	// 准备SOCKS运行时
-	socksRuntime, err := prepareSocksRuntime(tunNet, connectionTimeout, idleTimeout)
+	socksRuntime, runtimeMeta, err := prepareSocksRuntime(tunNet, connectionTimeout, idleTimeout)
 	if err != nil {
 		return err
 	}
 
-	// 配置连接并启动隧道
 	readyCh := startTunnel(cmd, tlsConfig, endpoint, endpointSelector, tunDev, tunNet, socksRuntime)
-
-	slog.Info("waiting for MASQUE connection before starting SOCKS5 proxy listener")
 	<-readyCh
-	slog.Info("MASQUE connection established, starting SOCKS5 proxy listener")
 
-	// 创建并启动SOCKS服务器
-	return runSocksServer(socksRuntime, idleTimeout)
+	readyInfo := proxyReadyInfo{
+		endpoint:          endpoint,
+		endpointSelector:  endpointSelector,
+		useHTTP2:          config.AppConfig.Socks.HTTP2,
+		connectionTimeout: connectionTimeout,
+		overrides:         overrides,
+		configSaved:       configSaved,
+		meta:              runtimeMeta,
+	}
+	return runSocksServer(socksRuntime, idleTimeout, readyInfo)
 }
 
 // prepareTlsConfig 准备TLS配置
@@ -1097,6 +1114,7 @@ func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint net.Addr, e
 	reconnectDelay := config.AppConfig.Socks.ReconnectDelay.Duration()
 	maxReconnectAttempts := config.AppConfig.Socks.MaxReconnectAttempts
 	drainGrace := config.AppConfig.Socks.DrainGrace.Duration()
+	reconnectLog := &api.TunnelReconnectLog{Trigger: "backoff"}
 
 	configTunnel := api.ConnectionConfig{
 		TLSConfig:              tlsConfig,
@@ -1109,6 +1127,7 @@ func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint net.Addr, e
 		MaxReconnectAttempts:   maxReconnectAttempts,
 		AlwaysReconnect:        config.AppConfig.Socks.AlwaysReconnect,
 		WaitForReconnectDemand: socksRuntime.WaitForReconnectDemand,
+		ReconnectLog:           reconnectLog,
 		ReconnectStrategy: &api.ExponentialBackoff{
 			InitialDelay: reconnectDelay,
 			MaxDelay:     5 * time.Minute,
@@ -1130,8 +1149,20 @@ func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint net.Addr, e
 			if socksRuntime == nil {
 				return
 			}
+			reconnectLog.DisconnectedAt = time.Now()
 			socksRuntime.SetTunnelUp(false)
-			slog.Warn("tunnel down", "error", err)
+			reason, remote := api.TunnelDisconnectReason(err)
+			reconnectMode := "on_demand"
+			if config.AppConfig.Socks.AlwaysReconnect {
+				reconnectMode = "immediate"
+			}
+			slog.Warn(
+				"disconnected",
+				"reason", reason,
+				"remote", remote,
+				"grace", drainGrace,
+				"reconnect", reconnectMode,
+			)
 			socksRuntime.ScheduleDrain(err, drainGrace)
 		},
 	}
@@ -1146,31 +1177,29 @@ func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint net.Addr, e
 }
 
 // prepareSocksRuntime 创建SOCKS运行时，包括解析器、拨号器和可重建的server工厂
-func prepareSocksRuntime(tunNet *netstack.Net, connectionTimeout, idleTimeout time.Duration) (*socksRuntime, error) {
+func prepareSocksRuntime(tunNet *netstack.Net, connectionTimeout, idleTimeout time.Duration) (*socksRuntime, socksRuntimeMeta, error) {
 	routePolicy, err := newRoutePolicy(config.AppConfig.Socks.BypassDomain, config.AppConfig.Socks.ProxyTCPPort)
 	if err != nil {
-		return nil, err
+		return nil, socksRuntimeMeta{}, err
 	}
 	bypassMatcher := routePolicy.bypassMatcher
+	meta := socksRuntimeMeta{
+		blockUDP443: config.AppConfig.Socks.BlockUDP443,
+	}
 	if routePolicy.ProxyTCPPortsEnabled() {
-		slog.Info("proxy_tcp_port routing enabled", "count", len(routePolicy.proxyTCPPortList))
-		if bypassMatcher.Enabled() {
-			slog.Info("bypass_domain ignored for TCP routing because proxy_tcp_port is enabled")
-		}
+		meta.proxyTCPPorts = len(routePolicy.proxyTCPPortList)
 	} else if bypassMatcher.Enabled() {
-		slog.Info("bypass domain matcher enabled", "count", len(bypassMatcher.domains))
+		meta.bypassDomains = len(bypassMatcher.domains)
 	}
 
 	// 根据配置选择DNS解析器
 	var resolver api.NameResolver
 	if config.AppConfig.Socks.RemoteDNS {
-		slog.Info("using remote DNS resolver through TUN tunnel")
-
 		var dnsAddrs []netip.Addr
 		for _, dns := range config.AppConfig.Socks.DNS {
 			addr, err := netip.ParseAddr(dns)
 			if err != nil {
-				return nil, fmt.Errorf("Failed to parse DNS server %s: %v", dns, err)
+				return nil, socksRuntimeMeta{}, fmt.Errorf("Failed to parse DNS server %s: %v", dns, err)
 			}
 			dnsAddrs = append(dnsAddrs, addr)
 		}
@@ -1179,28 +1208,25 @@ func prepareSocksRuntime(tunNet *netstack.Net, connectionTimeout, idleTimeout ti
 		if bypassMatcher.Enabled() {
 			localResolver, err := newLocalDNSResolver()
 			if err != nil {
-				return nil, err
+				return nil, socksRuntimeMeta{}, err
 			}
 			resolver = newBypassAwareResolver(bypassMatcher, localResolver, tunnelResolver)
-			slog.Info("bypass-aware DNS resolver enabled for remote DNS mode")
+			meta.dnsMode = "remote+bypass"
 		} else {
 			resolver = tunnelResolver
+			meta.dnsMode = "remote"
 		}
 	} else {
-		slog.Info("using local DNS resolver")
 		localResolver, err := newLocalDNSResolver()
 		if err != nil {
-			return nil, err
+			return nil, socksRuntimeMeta{}, err
 		}
 		resolver = localResolver
+		meta.dnsMode = "local"
 	}
 
 	// 统一加缓存层，让 local / tunnel / bypass 三条路径都能享受缓存和 singleflight
 	resolver = api.NewCachingResolver(resolver, 10*time.Minute, 5*time.Second, 4096)
-
-	if config.AppConfig.Socks.BlockUDP443 {
-		slog.Info("UDP/443 blocking enabled; outbound QUIC/UDP will be rejected")
-	}
 
 	// 仅负责实际拨号，不做隧道状态门控；门控由socksRuntime统一处理。
 	upstreamDial := func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -1262,34 +1288,73 @@ func prepareSocksRuntime(tunNet *netstack.Net, connectionTimeout, idleTimeout ti
 		},
 	)
 	runtime.SetVerboseLogging(config.AppConfig.Logging.SocksVerbose)
-	if config.AppConfig.Logging.SocksVerbose {
-		slog.Info("SOCKS verbose logging enabled")
-	}
 
-	return runtime, nil
+	return runtime, meta, nil
+}
+
+func proxyTransportLabel(useHTTP2 bool) string {
+	if useHTTP2 {
+		return "http2"
+	}
+	return "http3"
+}
+
+func selectedProxyEndpoint(endpoint net.Addr, selector func() net.Addr) string {
+	if selector != nil {
+		if selected := selector(); selected != nil {
+			return selected.String()
+		}
+	}
+	if endpoint != nil {
+		return endpoint.String()
+	}
+	return ""
+}
+
+func logProxyReady(listenerAddr net.Addr, idleTimeout time.Duration, info proxyReadyInfo) {
+	attrs := []any{
+		"addr", listenerAddr.String(),
+		"connect_timeout", info.connectionTimeout,
+		"idle_timeout", idleTimeout,
+	}
+	if info.socksOnly {
+		attrs = append(attrs, "mode", "socks", "dns", info.meta.dnsMode)
+	} else {
+		attrs = append(attrs,
+			"endpoint", selectedProxyEndpoint(info.endpoint, info.endpointSelector),
+			"transport", proxyTransportLabel(info.useHTTP2),
+			"dns", info.meta.dnsMode,
+			"tunnel", "up",
+		)
+	}
+	if info.meta.blockUDP443 {
+		attrs = append(attrs, "block_udp_443", true)
+	}
+	if info.meta.bypassDomains > 0 {
+		attrs = append(attrs, "bypass_domains", info.meta.bypassDomains)
+	}
+	if info.meta.proxyTCPPorts > 0 {
+		attrs = append(attrs, "proxy_tcp_ports", info.meta.proxyTCPPorts)
+	}
+	if len(info.overrides) > 0 {
+		attrs = append(attrs, "overrides", strings.Join(info.overrides, ","))
+	}
+	if info.configSaved {
+		attrs = append(attrs, "config_saved", true)
+	}
+	slog.Info("ready", attrs...)
 }
 
 // runSocksServer 创建并运行SOCKS5服务器
-func runSocksServer(socksRuntime *socksRuntime, idleTimeout time.Duration) error {
-	// 从配置中获取网络参数
+func runSocksServer(socksRuntime *socksRuntime, idleTimeout time.Duration, readyInfo proxyReadyInfo) error {
 	bindAddress := config.AppConfig.Socks.BindAddress
 	port := config.AppConfig.Socks.Port
-
-	// 启动监听
-	slog.Info(
-		"SOCKS proxy listening",
-		"addr",
-		net.JoinHostPort(bindAddress, port),
-		"connect_timeout",
-		config.AppConfig.Socks.ConnectionTimeout.Duration(),
-		"idle_timeout",
-		idleTimeout,
-	)
 
 	listener, err := net.Listen("tcp", net.JoinHostPort(bindAddress, port))
 	if err != nil {
 		return fmt.Errorf("Failed to start SOCKS proxy: %v", err)
 	}
+	logProxyReady(listener.Addr(), idleTimeout, readyInfo)
 
 	var connSeq atomic.Uint64
 	acceptBackoff := 5 * time.Millisecond
@@ -1298,7 +1363,7 @@ func runSocksServer(socksRuntime *socksRuntime, idleTimeout time.Duration) error
 		conn, err := listener.Accept()
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
-				slog.Info("SOCKS listener closed, shutting down")
+				slog.Info("listener closed")
 				return nil
 			}
 			slog.Warn("failed to accept connection", "error", err)

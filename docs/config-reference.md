@@ -23,6 +23,8 @@ These fields are useful for both usque and WG mode.
 | `logging.level` | `info` | both | `debug`, `info`, `warn`, or `error` |
 | `logging.format` | `text` | both | `text` or `json` |
 | `logging.socks_verbose` | `false` | both | Extra SOCKS connection diagnostics |
+
+At `info`, lifecycle logs use clear `msg` labels (`tunnel connected`, `tunnel disconnected`, `tunnel reconnected`, `socks ready`) with details in structured fields. Tunnel reconnect steps and SOCKS drain internals are at `debug`.
 | `registration.device_name` | generated or empty | usque registration | Device name used during registration |
 
 Duration fields accept human-readable strings such as `"2s"`, `"30s"`, and `"5m"`. Legacy numeric nanosecond values are still accepted.

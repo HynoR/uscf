@@ -181,12 +181,12 @@ func (r *socksRuntime) RestartAndDrain(reason error) {
 	defer r.restartMu.Unlock()
 	start := time.Now()
 
-	slog.Warn("restarting SOCKS runtime after tunnel down", "reason", reason)
+	slog.Debug("drain restart", "reason", reason)
 	r.server.Store(r.serverFactory(r.DialContext))
 
 	drained := r.drainActiveConnections()
-	slog.Info(
-		"active SOCKS connections drained",
+	slog.Debug(
+		"drain complete",
 		"count",
 		drained,
 		"reason",
@@ -205,7 +205,6 @@ func (r *socksRuntime) ScheduleDrain(reason error, grace time.Duration) {
 	r.drainMu.Lock()
 	if r.scheduledDrain != nil {
 		r.drainMu.Unlock()
-		slog.Debug("SOCKS drain already scheduled", "reason", reason, "grace", grace)
 		return
 	}
 
@@ -219,14 +218,11 @@ func (r *socksRuntime) ScheduleDrain(reason error, grace time.Duration) {
 	handle.timer = time.AfterFunc(grace, func() {
 		r.clearScheduledDrain(handle)
 		if r.IsTunnelUp() {
-			slog.Info("scheduled SOCKS drain skipped after tunnel recovery", "reason", reason)
 			return
 		}
 		r.RestartAndDrain(reason)
 	})
 	r.drainMu.Unlock()
-
-	slog.Warn("scheduled SOCKS drain after tunnel grace", "reason", reason, "grace", grace)
 }
 
 func (r *socksRuntime) CancelScheduledDrain() bool {
@@ -238,11 +234,7 @@ func (r *socksRuntime) CancelScheduledDrain() bool {
 	if handle == nil {
 		return false
 	}
-	stopped := handle.timer.Stop()
-	if stopped {
-		slog.Info("scheduled SOCKS drain cancelled after tunnel recovery")
-	}
-	return stopped
+	return handle.timer.Stop()
 }
 
 func (r *socksRuntime) clearScheduledDrain(handle *drainHandle) {

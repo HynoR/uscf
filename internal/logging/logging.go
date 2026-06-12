@@ -1,6 +1,8 @@
 package logging
 
 import (
+	"io"
+	"log"
 	"log/slog"
 	"os"
 	"strings"
@@ -25,6 +27,8 @@ func Setup(cfg config.LoggingConfig) config.LoggingConfig {
 
 	logger := slog.New(handler)
 	slog.SetDefault(logger)
+	// connect-ip-go logs stream errors via log.Printf; discard — uscf logs disconnect separately.
+	log.SetOutput(io.Discard)
 
 	if len(issues) > 0 {
 		logger.Warn("invalid logging config; using defaults", "issues", strings.Join(issues, "; "))

@@ -85,7 +85,7 @@ func TestRunSocksCmdUsesConfigWithoutKeyMaterial(t *testing.T) {
 	}
 
 	sentinel := errors.New("stop server")
-	runSocksServerFunc = func(runtime *socksRuntime, idleTimeout time.Duration) error {
+	runSocksServerFunc = func(runtime *socksRuntime, idleTimeout time.Duration, _ proxyReadyInfo) error {
 		if !runtime.IsTunnelUp() {
 			t.Fatalf("expected direct socks runtime to stay up")
 		}
@@ -165,7 +165,7 @@ func TestRunSocksCmdLoadsPublicConfigOnly(t *testing.T) {
 	}
 
 	sentinel := errors.New("stop server")
-	runSocksServerFunc = func(runtime *socksRuntime, idleTimeout time.Duration) error {
+	runSocksServerFunc = func(runtime *socksRuntime, idleTimeout time.Duration, _ proxyReadyInfo) error {
 		return sentinel
 	}
 

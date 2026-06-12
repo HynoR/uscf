@@ -25,7 +25,7 @@ func TestApplySocksFlagOverridesUseIPv6WhenFlagProvided(t *testing.T) {
 		t.Fatalf("failed to set use-ipv6 flag: %v", err)
 	}
 
-	changed := applySocksFlagOverrides(cmd, &cfg)
+	changed, _ := applySocksFlagOverrides(cmd, &cfg)
 	if !changed {
 		t.Fatalf("expected config to be marked changed")
 	}
@@ -38,7 +38,7 @@ func TestApplySocksFlagOverridesUseIPv6UnchangedWhenFlagOmitted(t *testing.T) {
 	cfg := config.Config{Socks: config.SocksConfig{UseIPv6: true}}
 	cmd := newSocksOverrideCmdForTest()
 
-	changed := applySocksFlagOverrides(cmd, &cfg)
+	changed, _ := applySocksFlagOverrides(cmd, &cfg)
 	if changed {
 		t.Fatalf("expected no config change when use-ipv6 flag is omitted")
 	}
@@ -54,7 +54,7 @@ func TestApplySocksFlagOverridesUseIPv6AllowsFalseWhenExplicitlyProvided(t *test
 		t.Fatalf("failed to set use-ipv6 flag: %v", err)
 	}
 
-	changed := applySocksFlagOverrides(cmd, &cfg)
+	changed, _ := applySocksFlagOverrides(cmd, &cfg)
 	if !changed {
 		t.Fatalf("expected config to be marked changed")
 	}
@@ -70,7 +70,7 @@ func TestApplySocksFlagOverridesHTTP2WhenFlagProvided(t *testing.T) {
 		t.Fatalf("failed to set http2 flag: %v", err)
 	}
 
-	changed := applySocksFlagOverrides(cmd, &cfg)
+	changed, _ := applySocksFlagOverrides(cmd, &cfg)
 	if !changed {
 		t.Fatalf("expected config to be marked changed")
 	}
@@ -86,7 +86,7 @@ func TestApplySocksFlagOverridesHTTP2AllowsFalseWhenExplicitlyProvided(t *testin
 		t.Fatalf("failed to set http2 flag: %v", err)
 	}
 
-	changed := applySocksFlagOverrides(cmd, &cfg)
+	changed, _ := applySocksFlagOverrides(cmd, &cfg)
 	if !changed {
 		t.Fatalf("expected config to be marked changed")
 	}

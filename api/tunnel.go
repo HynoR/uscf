@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"crypto/tls"
-	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand"
@@ -176,6 +175,7 @@ type ConnectionConfig struct {
 	ReconnectStrategy    BackoffStrategy
 	OnConnected          func()          // Optional callback after MASQUE connection is established.
 	OnDisconnected       func(err error) // Optional callback after an established MASQUE connection is lost.
+	ReconnectLog         *TunnelReconnectLog // Optional state for compact reconnect logging.
 
 	// AlwaysReconnect, when true, rebuilds the tunnel immediately after it is
 	// lost, even when idle. When false (default), a tunnel that was established
@@ -189,6 +189,13 @@ type ConnectionConfig struct {
 	// until ctx is cancelled. Only consulted when AlwaysReconnect is false and
 	// an established connection was lost. Nil disables the gate (eager reconnect).
 	WaitForReconnectDemand func(ctx context.Context) error
+}
+
+// TunnelReconnectLog tracks tunnel lifecycle for one-line reconnect logs.
+type TunnelReconnectLog struct {
+	HasConnectedOnce bool
+	DisconnectedAt   time.Time
+	Trigger          string // demand, backoff, or initial
 }
 
 // BackoffStrategy 定义重连策略接口
@@ -266,15 +273,9 @@ func handleConnectionWithForwarding(ctx context.Context, config ConnectionConfig
 		}
 	}
 
-	slog.Info(
-		"establishing MASQUE connection",
-		"endpoint",
-		endpoint.String(),
-		"transport",
-		tunnelTransportLabel(config.UseHTTP2),
-		"attempt",
-		reconnectAttempt+1,
-	)
+	if reconnectAttempt == 0 && (config.ReconnectLog == nil || !config.ReconnectLog.HasConnectedOnce) {
+		slog.Info("connecting", "endpoint", endpoint.String(), "transport", tunnelTransportLabel(config.UseHTTP2))
+	}
 
 	udpConn, tr, ipConn, rsp, err := connectTunnelFunc(
 		ctx,
@@ -304,8 +305,21 @@ func handleConnectionWithForwarding(ctx context.Context, config ConnectionConfig
 		return reconnectAttempt + 1, fmt.Errorf("tunnel connection failed: %s", rsp.Status)
 	}
 
-	slog.Info("connected to MASQUE server")
 	connected = true
+	if config.ReconnectLog != nil && config.ReconnectLog.HasConnectedOnce {
+		attrs := []any{
+			"endpoint", endpoint.String(),
+			"transport", tunnelTransportLabel(config.UseHTTP2),
+			"trigger", config.ReconnectLog.Trigger,
+		}
+		if !config.ReconnectLog.DisconnectedAt.IsZero() {
+			attrs = append(attrs, "elapsed", time.Since(config.ReconnectLog.DisconnectedAt))
+		}
+		slog.Info("reconnected", attrs...)
+	}
+	if config.ReconnectLog != nil {
+		config.ReconnectLog.HasConnectedOnce = true
+	}
 	if config.OnConnected != nil {
 		config.OnConnected()
 	}
@@ -321,9 +335,6 @@ func handleConnectionWithForwarding(ctx context.Context, config ConnectionConfig
 
 	select {
 	case err = <-forwardingErrCh:
-		if err != nil && !errors.Is(err, context.Canceled) {
-			slog.Warn("forwarding error", "error", err)
-		}
 		return 0, err
 	case <-ctx.Done():
 		return 0, ctx.Err()
@@ -337,6 +348,19 @@ func tunnelTransportLabel(useHTTP2 bool) string {
 	return "http3"
 }
 
+func selectedTunnelEndpoint(config ConnectionConfig) string {
+	endpoint := config.Endpoint
+	if config.EndpointSelector != nil {
+		if selected := config.EndpointSelector(); selected != nil {
+			endpoint = selected
+		}
+	}
+	if endpoint == nil {
+		return ""
+	}
+	return endpoint.String()
+}
+
 func MaintainTunnel(ctx context.Context, config ConnectionConfig, device TunnelDevice) {
 	reconnectAttempt := 0
 	var err error
@@ -347,7 +371,7 @@ func MaintainTunnel(ctx context.Context, config ConnectionConfig, device TunnelD
 	for {
 		select {
 		case <-ctx.Done():
-			slog.Info("context canceled, stopping tunnel maintenance")
+			slog.Debug("tunnel shutdown")
 			return
 		default:
 		}
@@ -364,11 +388,12 @@ func MaintainTunnel(ctx context.Context, config ConnectionConfig, device TunnelD
 			// demand, so an idle tunnel that Cloudflare evicted stays down until
 			// it is actually needed again.
 			if reconnectAttempt == 0 && !config.AlwaysReconnect && config.WaitForReconnectDemand != nil {
-				slog.Info("tunnel closed; waiting for outbound traffic before reconnecting")
+				if config.ReconnectLog != nil {
+					config.ReconnectLog.Trigger = "demand"
+				}
 				if werr := config.WaitForReconnectDemand(ctx); werr != nil {
 					return
 				}
-				slog.Info("outbound traffic detected, reconnecting")
 				config.ReconnectStrategy.Reset()
 				continue
 			}
@@ -387,8 +412,18 @@ func MaintainTunnel(ctx context.Context, config ConnectionConfig, device TunnelD
 				return
 			}
 
+			if config.ReconnectLog != nil {
+				config.ReconnectLog.Trigger = "backoff"
+			}
 			delay := config.ReconnectStrategy.NextDelay(reconnectAttempt)
-			slog.Warn("connection error, retrying", "error", err, "delay", delay)
+			failEndpoint := selectedTunnelEndpoint(config)
+			slog.Warn(
+				"connect failed",
+				"endpoint", failEndpoint,
+				"attempt", reconnectAttempt,
+				"delay", delay,
+				"error", err,
+			)
 
 			select {
 			case <-time.After(delay):

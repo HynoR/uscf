@@ -2,6 +2,7 @@ package logging
 
 import (
 	"io"
+	"log"
 	"log/slog"
 	"os"
 	"strings"
@@ -50,6 +51,21 @@ func TestSetup_LevelFiltering(t *testing.T) {
 	}
 	if !strings.Contains(output, "visible-info") {
 		t.Fatalf("info message should be visible, got: %q", output)
+	}
+}
+
+func TestSetup_LogPackageFilteredAtInfo(t *testing.T) {
+	output := captureStderrOutput(t, func() {
+		Setup(config.LoggingConfig{Level: "info", Format: "text"})
+		log.Printf("stdlib-info-check")
+		slog.Warn("slog-warn-check")
+	})
+
+	if strings.Contains(output, "stdlib-info-check") {
+		t.Fatalf("log.Printf should be discarded after Setup, got: %q", output)
+	}
+	if !strings.Contains(output, "slog-warn-check") {
+		t.Fatalf("slog.Warn should be visible, got: %q", output)
 	}
 }
 

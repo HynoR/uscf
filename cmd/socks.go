@@ -60,10 +60,10 @@ func runSocksCmd(cmd *cobra.Command, args []string) error {
 	}
 	config.AppConfig.Logging = logging.Setup(config.AppConfig.Logging)
 
-	applySocksFlagOverrides(cmd, &config.AppConfig)
+	_, flagOverrides := applySocksFlagOverrides(cmd, &config.AppConfig)
 
 	if ignored := ignoredSocksOnlySettings(config.AppConfig); len(ignored) > 0 {
-		slog.Info("SOCKS-only mode ignores tunnel-specific settings", "fields", strings.Join(ignored, ","))
+		slog.Debug("socks ignores tunnel settings", "fields", strings.Join(ignored, ","))
 	}
 
 	connectionTimeout, idleTimeout := getTimeoutSettings(cmd)
@@ -72,13 +72,17 @@ func runSocksCmd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	slog.Info("starting SOCKS-only mode without TUN or MASQUE")
-	return runSocksServerFunc(runtime, idleTimeout)
+	readyInfo := proxyReadyInfo{
+		connectionTimeout: connectionTimeout,
+		overrides:         flagOverrides,
+		socksOnly:         true,
+		meta:              socksRuntimeMeta{dnsMode: "system"},
+	}
+	return runSocksServerFunc(runtime, idleTimeout, readyInfo)
 }
 
 func prepareDirectSocksRuntime(connectionTimeout, idleTimeout time.Duration) (*socksRuntime, error) {
 	localResolver := systemDNSResolver{}
-	slog.Info("SOCKS-only mode uses the system DNS resolver")
 
 	directDial := func(ctx context.Context, network, addr string) (net.Conn, error) {
 		dialCtx, cancel := context.WithTimeout(ctx, connectionTimeout)
@@ -111,9 +115,6 @@ func prepareDirectSocksRuntime(connectionTimeout, idleTimeout time.Duration) (*s
 	)
 	runtime.SetTunnelUp(true)
 	runtime.SetVerboseLogging(config.AppConfig.Logging.SocksVerbose)
-	if config.AppConfig.Logging.SocksVerbose {
-		slog.Info("SOCKS verbose logging enabled")
-	}
 
 	return runtime, nil
 }
