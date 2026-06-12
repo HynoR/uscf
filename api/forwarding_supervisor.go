@@ -159,6 +159,33 @@ func (s *forwardingSupervisor) reportSessionError(session *forwardSession, err e
 func (s *forwardingSupervisor) runDeviceToIP() {
 	defer s.wg.Done()
 
+	// Devices that support batched reads (the forked netstack TUN) deliver up
+	// to BatchSize packets per call; plain TunnelDevices go through a
+	// single-packet shim. The pump owns its read buffers outright: it is the
+	// sole reader and every packet is fully consumed by WritePacket before the
+	// next read, so the buffers are reused across iterations instead of
+	// cycling through the shared pool.
+	batch := 1
+	var readBatch func(bufs [][]byte, sizes []int) (int, error)
+	if dev, ok := s.device.(BatchTunnelDevice); ok && dev.BatchSize() > 1 {
+		batch = dev.BatchSize()
+		readBatch = dev.ReadPackets
+	} else {
+		readBatch = func(bufs [][]byte, sizes []int) (int, error) {
+			n, err := s.device.ReadPacket(bufs[0])
+			if err != nil {
+				return 0, err
+			}
+			sizes[0] = n
+			return 1, nil
+		}
+	}
+	bufs := make([][]byte, batch)
+	for i := range bufs {
+		bufs[i] = make([]byte, s.bufPool.capacity)
+	}
+	sizes := make([]int, batch)
+
 	for {
 		select {
 		case <-s.ctx.Done():
@@ -166,11 +193,8 @@ func (s *forwardingSupervisor) runDeviceToIP() {
 		default:
 		}
 
-		buf := s.bufPool.GetBuf()
-
-		n, err := s.device.ReadPacket(*buf)
+		n, err := readBatch(bufs, sizes)
 		if err != nil {
-			s.bufPool.PutBuf(buf)
 			if s.ctx.Err() != nil {
 				return
 			}
@@ -193,32 +217,33 @@ func (s *forwardingSupervisor) runDeviceToIP() {
 		// discarding keeps the netstack device drained so it never blocks.
 		session := s.activeSession()
 		if session == nil || session.ctx.Err() != nil {
-			s.bufPool.PutBuf(buf)
 			continue
 		}
 
-		icmp, err := session.conn.WritePacket((*buf)[:n])
-		s.bufPool.PutBuf(buf)
-		if err != nil {
-			// Any write error means this IP connection is unusable; signal a
-			// reconnect (unless this session was already superseded).
-			if s.isActiveSession(session) {
-				s.reportSessionError(session, fmt.Errorf("error writing to IP connection: %w", err))
+		for i := 0; i < n; i++ {
+			icmp, err := session.conn.WritePacket(bufs[i][:sizes[i]])
+			if err != nil {
+				// Any write error means this IP connection is unusable; signal a
+				// reconnect (unless this session was already superseded) and drop
+				// the rest of the batch.
+				if s.isActiveSession(session) {
+					s.reportSessionError(session, fmt.Errorf("error writing to IP connection: %w", err))
+				}
+				break
 			}
-			continue
-		}
 
-		if len(icmp) > 0 {
-			// Never inject the ICMP packet from this goroutine: it is the sole
-			// reader of the TUN device, and netstack can synchronously emit a
-			// retransmission while handling the ICMP error. That emission blocks
-			// on the device's unbuffered packet channel until the device is read
-			// again, which would deadlock this loop permanently. Hand the packet
-			// to a dedicated injector goroutine instead.
-			select {
-			case s.icmpCh <- icmp:
-			default:
-				slog.Warn("dropping ICMP packet: injector queue full")
+			if len(icmp) > 0 {
+				// Never inject the ICMP packet from this goroutine: it is the sole
+				// reader of the TUN device, and netstack can synchronously emit a
+				// retransmission while handling the ICMP error. Even with the
+				// fork's buffered packet channel, injecting mid-drain from the
+				// reader risks stalling the loop. Hand the packet to a dedicated
+				// injector goroutine instead.
+				select {
+				case s.icmpCh <- icmp:
+				default:
+					slog.Warn("dropping ICMP packet: injector queue full")
+				}
 			}
 		}
 	}

@@ -85,6 +85,20 @@ type TunnelDevice interface {
 	WritePacket(pkt []byte) error
 }
 
+// BatchTunnelDevice is an optional extension of TunnelDevice for devices that
+// can return several packets per read (e.g. the forked netstack TUN). The
+// forwarding supervisor type-asserts for it and falls back to single-packet
+// ReadPacket otherwise.
+type BatchTunnelDevice interface {
+	// ReadPackets fills bufs with up to len(bufs) packets, recording each
+	// packet's length in sizes, and returns the number of packets read.
+	// It blocks until at least one packet is available.
+	ReadPackets(bufs [][]byte, sizes []int) (int, error)
+	// BatchSize is the maximum number of packets a single ReadPackets call
+	// may return.
+	BatchSize() int
+}
+
 // NetstackAdapter wraps a tun.Device (e.g. from netstack) to satisfy TunnelDevice.
 type NetstackAdapter struct {
 	dev            tun.Device
@@ -112,6 +126,17 @@ func (n *NetstackAdapter) ReadPacket(buf []byte) (int, error) {
 	}
 
 	return (*sizes)[0], nil
+}
+
+// ReadPackets implements BatchTunnelDevice by passing the caller's buffers
+// straight to the device's batched Read.
+func (n *NetstackAdapter) ReadPackets(bufs [][]byte, sizes []int) (int, error) {
+	return n.dev.Read(bufs, sizes, 0)
+}
+
+// BatchSize implements BatchTunnelDevice.
+func (n *NetstackAdapter) BatchSize() int {
+	return n.dev.BatchSize()
 }
 
 func (n *NetstackAdapter) WritePacket(pkt []byte) error {

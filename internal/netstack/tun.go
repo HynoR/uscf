@@ -6,6 +6,8 @@
 // Forked from golang.zx2c4.com/wireguard@v0.0.0-20250505131008-436f7fdc1670
 // tun/netstack/tun.go. Local modifications (see PERFORMANCE.md):
 //   - buffered incomingPacket channel (incomingPacketQueueDepth)
+//   - batched Read: blocks for the first packet, then drains the queue
+//     non-blocking up to len(buf); BatchSize() reports batchSize instead of 1
 package netstack
 
 import (
@@ -140,7 +142,26 @@ func (tun *netTun) Read(buf [][]byte, sizes []int, offset int) (int, error) {
 		return 0, err
 	}
 	sizes[0] = n
-	return 1, nil
+	count := 1
+
+	// Drain whatever is already queued without blocking, up to len(buf).
+	for count < len(buf) {
+		select {
+		case view, ok := <-tun.incomingPacket:
+			if !ok {
+				return count, nil
+			}
+			n, err := view.Read(buf[count][offset:])
+			if err != nil {
+				return count, err
+			}
+			sizes[count] = n
+			count++
+		default:
+			return count, nil
+		}
+	}
+	return count, nil
 }
 
 func (tun *netTun) Write(buf [][]byte, offset int) (int, error) {
@@ -196,8 +217,12 @@ func (tun *netTun) MTU() (int, error) {
 	return tun.mtu, nil
 }
 
+// batchSize bounds how many packets a single Read call may return. Callers
+// size their buffer slices to this; it must not exceed incomingPacketQueueDepth.
+const batchSize = 128
+
 func (tun *netTun) BatchSize() int {
-	return 1
+	return batchSize
 }
 
 func convertToFullAddr(endpoint netip.AddrPort) (tcpip.FullAddress, tcpip.NetworkProtocolNumber) {

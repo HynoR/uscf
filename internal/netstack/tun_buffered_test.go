@@ -5,6 +5,8 @@ import (
 	"net/netip"
 	"testing"
 	"time"
+
+	"gvisor.dev/gvisor/pkg/buffer"
 )
 
 func newTestTUN(t *testing.T) (*netTun, *Net) {
@@ -52,6 +54,78 @@ func TestWriteNotifyDoesNotBlockWithoutReader(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("write burst blocked: incomingPacket channel is not buffered")
+	}
+}
+
+func makeReadBufs(n, size int) ([][]byte, []int) {
+	bufs := make([][]byte, n)
+	for i := range bufs {
+		bufs[i] = make([]byte, size)
+	}
+	return bufs, make([]int, n)
+}
+
+// TestReadDrainsBatch checks that a single Read call returns every packet
+// already queued, up to len(bufs).
+func TestReadDrainsBatch(t *testing.T) {
+	nt, _ := newTestTUN(t)
+
+	const queued = 10
+	for i := 0; i < queued; i++ {
+		nt.incomingPacket <- buffer.NewViewWithData([]byte{byte(i), 1, 2, 3})
+	}
+
+	bufs, sizes := makeReadBufs(batchSize, 1280)
+	n, err := nt.Read(bufs, sizes, 0)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if n != queued {
+		t.Fatalf("Read returned %d packets, want %d", n, queued)
+	}
+	for i := 0; i < n; i++ {
+		if sizes[i] != 4 {
+			t.Fatalf("packet %d: size %d, want 4", i, sizes[i])
+		}
+		if bufs[i][0] != byte(i) {
+			t.Fatalf("packet %d: first byte %d, want %d (order broken)", i, bufs[i][0], i)
+		}
+	}
+}
+
+// TestReadBlocksForFirstThenNonBlocking checks that Read blocks while the
+// queue is empty and returns exactly one packet when only one arrives.
+func TestReadBlocksForFirstThenNonBlocking(t *testing.T) {
+	nt, _ := newTestTUN(t)
+
+	bufs, sizes := makeReadBufs(batchSize, 1280)
+	got := make(chan int, 1)
+	go func() {
+		n, err := nt.Read(bufs, sizes, 0)
+		if err != nil {
+			got <- -1
+			return
+		}
+		got <- n
+	}()
+
+	select {
+	case n := <-got:
+		t.Fatalf("Read returned %d before any packet was queued", n)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	nt.incomingPacket <- buffer.NewViewWithData([]byte{42})
+	select {
+	case n := <-got:
+		if n != 1 {
+			t.Fatalf("Read returned %d packets, want 1", n)
+		}
+		if sizes[0] != 1 || bufs[0][0] != 42 {
+			t.Fatalf("unexpected packet: size %d, byte %d", sizes[0], bufs[0][0])
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Read did not return after a packet was queued")
 	}
 }
 
