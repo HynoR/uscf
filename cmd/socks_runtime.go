@@ -8,11 +8,19 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/things-go/go-socks5"
 )
 
 var ErrTunnelDisconnected = errors.New("tunnel disconnected")
+
+// socksDialFunc dials an upstream connection for the given network and address.
+type socksDialFunc = func(ctx context.Context, network, addr string) (net.Conn, error)
+
+// socksServer serves a single accepted SOCKS5 client connection. It decouples
+// socksRuntime from any concrete SOCKS library so the underlying implementation
+// can be swapped behind this interface.
+type socksServer interface {
+	ServeConn(net.Conn) error
+}
 
 type socksRuntime struct {
 	tunnelUp       atomic.Bool
@@ -21,15 +29,15 @@ type socksRuntime struct {
 	drainMu        sync.Mutex
 	scheduledDrain *time.Timer
 	activeConns    sync.Map
-	server         atomic.Value // *socks5.Server
-	serverFactory  func(dialFunc func(ctx context.Context, network, addr string) (net.Conn, error)) *socks5.Server
-	upstreamDial   func(ctx context.Context, network, addr string) (net.Conn, error)
+	server         atomic.Value // socksServer
+	serverFactory  func(dialFunc socksDialFunc) socksServer
+	upstreamDial   socksDialFunc
 	demand         chan struct{} // cap-1: signals outbound demand while the tunnel is down
 }
 
 func newSocksRuntime(
-	upstreamDial func(ctx context.Context, network, addr string) (net.Conn, error),
-	serverFactory func(dialFunc func(ctx context.Context, network, addr string) (net.Conn, error)) *socks5.Server,
+	upstreamDial socksDialFunc,
+	serverFactory func(dialFunc socksDialFunc) socksServer,
 ) *socksRuntime {
 	r := &socksRuntime{
 		serverFactory: serverFactory,
@@ -87,12 +95,12 @@ func (r *socksRuntime) VerboseLoggingEnabled() bool {
 	return r.verboseLogging.Load()
 }
 
-func (r *socksRuntime) CurrentServer() *socks5.Server {
+func (r *socksRuntime) CurrentServer() socksServer {
 	loaded := r.server.Load()
 	if loaded == nil {
 		return nil
 	}
-	srv, _ := loaded.(*socks5.Server)
+	srv, _ := loaded.(socksServer)
 	return srv
 }
 

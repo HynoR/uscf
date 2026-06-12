@@ -26,7 +26,6 @@ import (
 	"github.com/HynoR/uscf/config"
 	"github.com/HynoR/uscf/internal"
 	"github.com/spf13/cobra"
-	"github.com/things-go/go-socks5"
 	"golang.zx2c4.com/wireguard/tun"
 	"golang.zx2c4.com/wireguard/tun/netstack"
 )
@@ -838,7 +837,7 @@ func normalizeDNSServerAddress(dns string) (string, error) {
 	return "", fmt.Errorf("invalid DNS server address %q", dns)
 }
 
-func newLocalDNSResolver() (socks5.NameResolver, error) {
+func newLocalDNSResolver() (api.NameResolver, error) {
 	dnsTimeout := config.AppConfig.Socks.DNSTimeout.Duration()
 	dnsServer := "8.8.8.8:53"
 	if len(config.AppConfig.Socks.DNS) > 0 {
@@ -1093,7 +1092,7 @@ func prepareSocksRuntime(tunNet *netstack.Net, connectionTimeout, idleTimeout ti
 	}
 
 	// 根据配置选择DNS解析器
-	var resolver socks5.NameResolver
+	var resolver api.NameResolver
 	if config.AppConfig.Socks.RemoteDNS {
 		slog.Info("using remote DNS resolver through TUN tunnel")
 
@@ -1176,20 +1175,20 @@ func prepareSocksRuntime(tunNet *netstack.Net, connectionTimeout, idleTimeout ti
 	username := config.AppConfig.Socks.Username
 	password := config.AppConfig.Socks.Password
 
+	verbose := config.AppConfig.Logging.SocksVerbose
 	runtime := newSocksRuntime(
 		upstreamDial,
-		func(dialFunc func(ctx context.Context, network, addr string) (net.Conn, error)) *socks5.Server {
-			dialWithRequest := func(ctx context.Context, network, addr string, request *socks5.Request) (net.Conn, error) {
-				if !selectTCPRoute(routePolicy, network, addr, request) {
-					host, port, _ := extractRequestTarget(addr, request)
-					slog.Debug("route policy selected direct network", "network", network, "host", host, "port", port, "target", addr)
+		func(dialFunc socksDialFunc) socksServer {
+			dialWithTarget := func(ctx context.Context, network, addr string, target socksTarget) (net.Conn, error) {
+				if !selectTCPRoute(routePolicy, network, target) {
+					slog.Debug("route policy selected direct network", "network", network, "host", target.Host, "port", target.Port, "target", addr)
 					return directDial(ctx, network, addr)
 				}
 
 				return dialFunc(ctx, network, addr)
 			}
 
-			return createSocksServer(username, password, dialFunc, dialWithRequest, resolver)
+			return createSocksServer(username, password, resolver, dialWithTarget, verbose)
 		},
 	)
 	runtime.SetVerboseLogging(config.AppConfig.Logging.SocksVerbose)
@@ -1268,7 +1267,7 @@ func runSocksServer(socksRuntime *socksRuntime, idleTimeout time.Duration) error
 			continue
 		}
 
-		go func(server *socks5.Server, conn net.Conn, id uint64) {
+		go func(server socksServer, conn net.Conn, id uint64) {
 			if err := server.ServeConn(conn); err != nil && !errors.Is(err, net.ErrClosed) {
 				if socksRuntime.VerboseLoggingEnabled() {
 					slog.Warn("failed to serve SOCKS connection", "conn_id", id, "error", err)
@@ -1283,67 +1282,15 @@ func runSocksServer(socksRuntime *socksRuntime, idleTimeout time.Duration) error
 	}
 }
 
-// createSocksServer 创建SOCKS5服务器
+// createSocksServer 创建SOCKS5服务器（基于 txthinking/socks5 的自定义 adapter）。
+// dialWithTarget 负责在已解析地址上拨号，同时拿到原始 target 以便做路由判定。
 func createSocksServer(
 	username, password string,
-	dialFunc func(ctx context.Context, network, addr string) (net.Conn, error),
-	dialWithRequest func(ctx context.Context, network, addr string, request *socks5.Request) (net.Conn, error),
-	resolver socks5.NameResolver,
-) *socks5.Server {
-	buf := api.NewNetBuffer(32 * 1024) // 32KB buffer
-	if buf == nil {
-		slog.Error("failed to create buffer pool for SOCKS5")
-		return nil
-	}
-
-	logger := socks5SlogLogger{}
-
-	if username == "" || password == "" {
-		return socks5.NewServer(
-			socks5.WithLogger(logger),
-			socks5.WithDial(dialFunc),
-			socks5.WithDialAndRequest(dialWithRequest),
-			socks5.WithResolver(resolver),
-			socks5.WithBufferPool(buf),
-		)
-	} else {
-
-		return socks5.NewServer(
-			socks5.WithLogger(logger),
-			socks5.WithDial(dialFunc),
-			socks5.WithDialAndRequest(dialWithRequest),
-			socks5.WithResolver(resolver),
-			socks5.WithAuthMethods([]socks5.Authenticator{
-				socks5.UserPassAuthenticator{
-					Credentials: socks5.StaticCredentials{
-						username: password,
-					},
-				}}),
-			socks5.WithBufferPool(buf),
-		)
-	}
+	resolver api.NameResolver,
+	dialWithTarget targetDialFunc,
+	verbose bool,
+) socksServer {
+	return newTxthinkingAdapter(username, password, resolver, dialWithTarget, verbose)
 }
-
-type socks5SlogLogger struct{}
 
 var errUDP443Blocked = errors.New("udp/443 blocked by config")
-
-func (socks5SlogLogger) Errorf(format string, args ...interface{}) {
-	msg := fmt.Sprintf("socks5: "+format, args...)
-	if shouldDowngradeSocks5Log(format, args...) {
-		slog.Debug(msg)
-		return
-	}
-	slog.Error(msg)
-}
-
-func shouldDowngradeSocks5Log(format string, args ...interface{}) bool {
-	if format == "client want to used addr %v, listen addr: %s" {
-		return true
-	}
-	if format != "connect to %v failed, %v" || len(args) == 0 {
-		return false
-	}
-	err, ok := args[len(args)-1].(error)
-	return ok && errors.Is(err, errUDP443Blocked)
-}

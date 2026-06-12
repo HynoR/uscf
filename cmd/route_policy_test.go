@@ -2,9 +2,6 @@ package cmd
 
 import (
 	"testing"
-
-	"github.com/things-go/go-socks5"
-	"github.com/things-go/go-socks5/statute"
 )
 
 func TestRoutePolicy_BypassDomainUsesDirectWhenNoProxyTCPPort(t *testing.T) {
@@ -58,14 +55,9 @@ func TestSelectTCPRoute_PrefersRequestPort(t *testing.T) {
 		t.Fatalf("newRoutePolicy() error = %v", err)
 	}
 
-	request := &socks5.Request{
-		RawDestAddr: &statute.AddrSpec{
-			FQDN: "example.com",
-			Port: 992,
-		},
-	}
+	target := socksTarget{Host: "example.com", Port: 992}
 
-	useTun := selectTCPRoute(policy, "tcp", "93.184.216.34:80", request)
+	useTun := selectTCPRoute(policy, "tcp", target)
 	if useTun {
 		t.Fatalf("expected request destination port to control routing and use direct path")
 	}
@@ -77,14 +69,9 @@ func TestSelectTCPRoute_UDPIsUnaffected(t *testing.T) {
 		t.Fatalf("newRoutePolicy() error = %v", err)
 	}
 
-	request := &socks5.Request{
-		RawDestAddr: &statute.AddrSpec{
-			FQDN: "example.com",
-			Port: 992,
-		},
-	}
+	target := socksTarget{Host: "example.com", Port: 992}
 
-	useTun := selectTCPRoute(policy, "udp", "93.184.216.34:80", request)
+	useTun := selectTCPRoute(policy, "udp", target)
 	if !useTun {
 		t.Fatalf("expected udp traffic to remain on tun path")
 	}

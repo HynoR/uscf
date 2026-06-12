@@ -7,15 +7,23 @@ import (
 	"net"
 	"testing"
 	"time"
-
-	"github.com/things-go/go-socks5"
 )
 
-func newRuntimeForTest(upstreamDial func(ctx context.Context, network, addr string) (net.Conn, error)) *socksRuntime {
+// stubSocksServer is a minimal socksServer used by the runtime tests; each
+// factory call returns a fresh instance so restart-rebuild assertions hold.
+type stubSocksServer struct {
+	dial socksDialFunc
+}
+
+func (s *stubSocksServer) ServeConn(conn net.Conn) error {
+	return conn.Close()
+}
+
+func newRuntimeForTest(upstreamDial socksDialFunc) *socksRuntime {
 	return newSocksRuntime(
 		upstreamDial,
-		func(dialFunc func(ctx context.Context, network, addr string) (net.Conn, error)) *socks5.Server {
-			return socks5.NewServer(socks5.WithDial(dialFunc))
+		func(dialFunc socksDialFunc) socksServer {
+			return &stubSocksServer{dial: dialFunc}
 		},
 	)
 }

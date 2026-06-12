@@ -1,14 +1,18 @@
 package cmd
 
 import (
-	"net"
-	"strconv"
 	"strings"
-
-	"github.com/things-go/go-socks5"
 
 	"github.com/HynoR/uscf/config"
 )
+
+// socksTarget is a library-agnostic SOCKS5 request destination used for routing
+// decisions. Host is the original requested host (domain or IP literal), before
+// DNS resolution, so domain-based rules such as bypass_domain keep working.
+type socksTarget struct {
+	Host string
+	Port int
+}
 
 type routePolicy struct {
 	bypassMatcher    *bypassDomainMatcher
@@ -52,39 +56,14 @@ func (p *routePolicy) ShouldUseTunTCP(host string, port int) bool {
 	return p.bypassMatcher == nil || !p.bypassMatcher.Match(host)
 }
 
-func selectTCPRoute(policy *routePolicy, network, addr string, request *socks5.Request) bool {
+func selectTCPRoute(policy *routePolicy, network string, target socksTarget) bool {
 	if policy == nil || !strings.HasPrefix(network, "tcp") {
 		return true
 	}
 
-	host, port, ok := extractRequestTarget(addr, request)
-	if !ok {
+	if strings.TrimSpace(target.Host) == "" || target.Port <= 0 {
 		return true
 	}
 
-	return policy.ShouldUseTunTCP(host, port)
-}
-
-func extractRequestTarget(addr string, request *socks5.Request) (string, int, bool) {
-	if request != nil && request.RawDestAddr != nil {
-		host := strings.TrimSpace(request.RawDestAddr.FQDN)
-		if host == "" && request.RawDestAddr.IP != nil {
-			host = request.RawDestAddr.IP.String()
-		}
-		if host != "" && request.RawDestAddr.Port > 0 {
-			return host, request.RawDestAddr.Port, true
-		}
-	}
-
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil || port == "" {
-		return "", 0, false
-	}
-
-	parsedPort, err := strconv.Atoi(port)
-	if err != nil {
-		return "", 0, false
-	}
-
-	return host, parsedPort, true
+	return policy.ShouldUseTunTCP(target.Host, target.Port)
 }

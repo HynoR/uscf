@@ -7,7 +7,7 @@ import (
 	"net/netip"
 	"strings"
 
-	"github.com/things-go/go-socks5"
+	"github.com/HynoR/uscf/api"
 )
 
 type bypassDomainMatcher struct {
@@ -90,11 +90,11 @@ func normalizeBypassDomain(domain string) string {
 
 type bypassAwareResolver struct {
 	matcher        *bypassDomainMatcher
-	localResolver  socks5.NameResolver
-	tunnelResolver socks5.NameResolver
+	localResolver  api.NameResolver
+	tunnelResolver api.NameResolver
 }
 
-func newBypassAwareResolver(matcher *bypassDomainMatcher, localResolver, tunnelResolver socks5.NameResolver) socks5.NameResolver {
+func newBypassAwareResolver(matcher *bypassDomainMatcher, localResolver, tunnelResolver api.NameResolver) api.NameResolver {
 	return &bypassAwareResolver{
 		matcher:        matcher,
 		localResolver:  localResolver,

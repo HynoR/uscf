@@ -15,7 +15,6 @@ import (
 	"github.com/HynoR/uscf/internal/logging"
 	"github.com/HynoR/uscf/models"
 	"github.com/spf13/cobra"
-	"github.com/things-go/go-socks5"
 )
 
 var (
@@ -78,7 +77,7 @@ func runSocksCmd(cmd *cobra.Command, args []string) error {
 }
 
 func prepareDirectSocksRuntime(connectionTimeout, idleTimeout time.Duration) (*socksRuntime, error) {
-	localResolver := socks5.DNSResolver{}
+	localResolver := systemDNSResolver{}
 	slog.Info("SOCKS-only mode uses the system DNS resolver")
 
 	directDial := func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -100,13 +99,14 @@ func prepareDirectSocksRuntime(connectionTimeout, idleTimeout time.Duration) (*s
 	username := config.AppConfig.Socks.Username
 	password := config.AppConfig.Socks.Password
 
+	verbose := config.AppConfig.Logging.SocksVerbose
 	runtime := newSocksRuntime(
 		directDial,
-		func(dialFunc func(ctx context.Context, network, addr string) (net.Conn, error)) *socks5.Server {
-			dialWithRequest := func(ctx context.Context, network, addr string, request *socks5.Request) (net.Conn, error) {
+		func(dialFunc socksDialFunc) socksServer {
+			dialWithTarget := func(ctx context.Context, network, addr string, target socksTarget) (net.Conn, error) {
 				return dialFunc(ctx, network, addr)
 			}
-			return createSocksServer(username, password, dialFunc, dialWithRequest, localResolver)
+			return createSocksServer(username, password, localResolver, dialWithTarget, verbose)
 		},
 	)
 	runtime.SetTunnelUp(true)
@@ -116,6 +116,21 @@ func prepareDirectSocksRuntime(connectionTimeout, idleTimeout time.Duration) (*s
 	}
 
 	return runtime, nil
+}
+
+// systemDNSResolver resolves names through the host's default resolver. Used by
+// SOCKS-only mode, replacing go-socks5's built-in DNSResolver.
+type systemDNSResolver struct{}
+
+func (systemDNSResolver) Resolve(ctx context.Context, name string) (context.Context, net.IP, error) {
+	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", name)
+	if err != nil {
+		return ctx, nil, err
+	}
+	if len(ips) == 0 {
+		return ctx, nil, fmt.Errorf("no IP found for %q", name)
+	}
+	return ctx, ips[0], nil
 }
 
 func ignoredSocksOnlySettings(cfg config.Config) []string {
