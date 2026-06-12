@@ -123,6 +123,82 @@ func TestMaintainTunnelUnlimitedRetriesWhenMaxIsZero(t *testing.T) {
 	}
 }
 
+func TestMaintainTunnelLazyReconnectWaitsForDemand(t *testing.T) {
+	oldConnectTunnelFunc := connectTunnelFunc
+	oldHandleForwardingFn := handleForwardingFn
+	defer func() {
+		connectTunnelFunc = oldConnectTunnelFunc
+		handleForwardingFn = oldHandleForwardingFn
+	}()
+
+	var connects atomic.Int32
+	connectTunnelFunc = func(
+		ctx context.Context,
+		tlsConfig *tls.Config,
+		quicConfig *quic.Config,
+		connectURI string,
+		endpoint *net.UDPAddr,
+	) (*net.UDPConn, *http3.Transport, *connectip.Conn, *http.Response, error) {
+		connects.Add(1)
+		return nil, nil, nil, &http.Response{StatusCode: http.StatusOK, Status: "200 OK"}, nil
+	}
+	// Every established connection drops immediately, exercising the
+	// established-then-lost path that the lazy gate guards.
+	handleForwardingFn = func(ctx context.Context, forwarding *forwardingSupervisor, ipConn *connectip.Conn) error {
+		return errors.New("connection dropped")
+	}
+
+	demand := make(chan struct{})
+	cfg := ConnectionConfig{
+		TLSConfig:         &tls.Config{},
+		KeepAlivePeriod:   time.Second,
+		InitialPacketSize: 1242,
+		Endpoint:          &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 443},
+		MTU:               1280,
+		AlwaysReconnect:   false,
+		WaitForReconnectDemand: func(ctx context.Context) error {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-demand:
+				return nil
+			}
+		},
+		ReconnectStrategy: staticBackoff{delay: time.Millisecond},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		MaintainTunnel(ctx, cfg, noopDevice{})
+	}()
+
+	// First connection is eager.
+	waitForAttempts(t, &connects, 1)
+
+	// After it drops, the lazy gate must block: no further connect until demand.
+	time.Sleep(60 * time.Millisecond)
+	if got := connects.Load(); got != 1 {
+		t.Fatalf("expected reconnect to be gated on demand, got %d connects", got)
+	}
+
+	// Signalling demand triggers exactly one reconnect.
+	demand <- struct{}{}
+	waitForAttempts(t, &connects, 2)
+	time.Sleep(60 * time.Millisecond)
+	if got := connects.Load(); got != 2 {
+		t.Fatalf("expected gate to re-engage after second drop, got %d connects", got)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatalf("MaintainTunnel did not exit after context cancel")
+	}
+}
+
 func waitForAttempts(t *testing.T, attempts *atomic.Int32, want int32) {
 	t.Helper()
 

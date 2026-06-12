@@ -1037,7 +1037,9 @@ func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint *net.UDPAdd
 		Endpoint:             endpoint,
 		EndpointSelector:     endpointSelector,
 		MTU:                  mtu,
-		MaxReconnectAttempts: maxReconnectAttempts,
+		MaxReconnectAttempts:   maxReconnectAttempts,
+		AlwaysReconnect:        config.AppConfig.Socks.AlwaysReconnect,
+		WaitForReconnectDemand: socksRuntime.WaitForReconnectDemand,
 		ReconnectStrategy: &api.ExponentialBackoff{
 			InitialDelay: reconnectDelay,
 			MaxDelay:     5 * time.Minute,
@@ -1047,6 +1049,7 @@ func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint *net.UDPAdd
 			if socksRuntime != nil {
 				socksRuntime.SetTunnelUp(true)
 				socksRuntime.CancelScheduledDrain()
+				socksRuntime.drainDemand()
 			}
 			writeTunnelStateSafe(tunnelStateUp)
 			readyOnce.Do(func() {

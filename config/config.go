@@ -133,6 +133,7 @@ type SocksConfig struct {
 	DrainGrace           Duration `json:"drain_grace"`            // 隧道断开后保留现有SOCKS连接的宽限期，超时仍未恢复则关闭
 	ConnectionTimeout    Duration `json:"connection_timeout"`     // 建立连接的超时时间
 	IdleTimeout          Duration `json:"idle_timeout"`           // 空闲连接的超时时间
+	AlwaysReconnect      bool     `json:"always_reconnect"`       // true=断线后立即重连；false(默认)=隧道空闲被服务端清掉后，等到有出站流量再重连
 }
 
 // SSHSocksConfig 包含SSH SOCKS5网关相关的配置
@@ -347,6 +348,7 @@ func GetDefaultSocksConfig() SocksConfig {
 		DrainGrace:           Duration(15 * time.Second),
 		ConnectionTimeout:    Duration(30 * time.Second),
 		IdleTimeout:          Duration(5 * time.Minute),
+		AlwaysReconnect:      false,
 	}
 }
 

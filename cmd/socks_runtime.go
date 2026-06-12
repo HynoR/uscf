@@ -24,6 +24,7 @@ type socksRuntime struct {
 	server         atomic.Value // *socks5.Server
 	serverFactory  func(dialFunc func(ctx context.Context, network, addr string) (net.Conn, error)) *socks5.Server
 	upstreamDial   func(ctx context.Context, network, addr string) (net.Conn, error)
+	demand         chan struct{} // cap-1: signals outbound demand while the tunnel is down
 }
 
 func newSocksRuntime(
@@ -33,9 +34,41 @@ func newSocksRuntime(
 	r := &socksRuntime{
 		serverFactory: serverFactory,
 		upstreamDial:  upstreamDial,
+		demand:        make(chan struct{}, 1),
 	}
 	r.server.Store(r.serverFactory(r.DialContext))
 	return r
+}
+
+// SignalDemand records that something wants the tunnel while it is down, so a
+// lazy (non-always-reconnect) MaintainTunnel loop wakes up and reconnects.
+// Non-blocking; the cap-1 channel coalesces bursts into a single token.
+func (r *socksRuntime) SignalDemand() {
+	select {
+	case r.demand <- struct{}{}:
+	default:
+	}
+}
+
+// WaitForReconnectDemand blocks until SignalDemand fires or ctx is cancelled.
+// Wired into api.ConnectionConfig.WaitForReconnectDemand.
+func (r *socksRuntime) WaitForReconnectDemand(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-r.demand:
+		return nil
+	}
+}
+
+// drainDemand clears any pending demand token. Called once the tunnel is up so
+// demand accumulated during a connect-failure backoff doesn't trigger a
+// spurious immediate reconnect after the next idle drop.
+func (r *socksRuntime) drainDemand() {
+	select {
+	case <-r.demand:
+	default:
+	}
 }
 
 func (r *socksRuntime) SetTunnelUp(up bool) {
@@ -95,6 +128,12 @@ func (r *socksRuntime) DropIfDisconnected(conn net.Conn) bool {
 	if r.IsTunnelUp() {
 		return false
 	}
+
+	// A client is trying to use the proxy while the tunnel is down: that is
+	// real demand. Wake a lazy MaintainTunnel loop so it reconnects. The
+	// connection itself is still dropped (the client retries once the tunnel
+	// is back up).
+	r.SignalDemand()
 
 	remote := "<unknown>"
 	if addr := conn.RemoteAddr(); addr != nil {

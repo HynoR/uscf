@@ -150,6 +150,19 @@ type ConnectionConfig struct {
 	ReconnectStrategy    BackoffStrategy
 	OnConnected          func()          // Optional callback after MASQUE connection is established.
 	OnDisconnected       func(err error) // Optional callback after an established MASQUE connection is lost.
+
+	// AlwaysReconnect, when true, rebuilds the tunnel immediately after it is
+	// lost, even when idle. When false (default), a tunnel that was established
+	// and then dropped is NOT rebuilt until there is fresh outbound demand —
+	// Cloudflare closes idle tunnels after ~5 minutes (H3_NO_ERROR), so eagerly
+	// reconnecting just to sit idle again wastes handshakes and fights that
+	// idle-eviction policy. The very first connection is always eager.
+	AlwaysReconnect bool
+	// WaitForReconnectDemand blocks until there is outbound demand for the
+	// tunnel (a SOCKS client wanting to dial, or pending outbound traffic), or
+	// until ctx is cancelled. Only consulted when AlwaysReconnect is false and
+	// an established connection was lost. Nil disables the gate (eager reconnect).
+	WaitForReconnectDemand func(ctx context.Context) error
 }
 
 // BackoffStrategy 定义重连策略接口
@@ -300,6 +313,21 @@ func MaintainTunnel(ctx context.Context, config ConnectionConfig, device TunnelD
 		}
 
 		if err != nil {
+			// reconnectAttempt == 0 means an established connection was lost
+			// (connect failures return attempt+1). When lazy-reconnect is
+			// enabled, don't rebuild the tunnel until there is fresh outbound
+			// demand, so an idle tunnel that Cloudflare evicted stays down until
+			// it is actually needed again.
+			if reconnectAttempt == 0 && !config.AlwaysReconnect && config.WaitForReconnectDemand != nil {
+				slog.Info("tunnel closed; waiting for outbound traffic before reconnecting")
+				if werr := config.WaitForReconnectDemand(ctx); werr != nil {
+					return
+				}
+				slog.Info("outbound traffic detected, reconnecting")
+				config.ReconnectStrategy.Reset()
+				continue
+			}
+
 			if config.MaxReconnectAttempts > 0 && reconnectAttempt >= config.MaxReconnectAttempts {
 				slog.Error(
 					"connection failed repeatedly, retry paused for manual intervention",
