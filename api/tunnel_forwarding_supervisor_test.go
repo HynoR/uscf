@@ -116,7 +116,7 @@ func TestForwardingSupervisorSingleDeviceReaderAcrossSessionSwitches(t *testing.
 	defer cancel()
 
 	device := newTestTunnelDevice()
-	supervisor := newForwardingSupervisor(ctx, device, &TunnelStats{}, NewNetBuffer(2048))
+	supervisor := newForwardingSupervisor(ctx, device, NewNetBuffer(2048))
 	t.Cleanup(func() {
 		device.Close()
 		supervisor.Close()
@@ -158,7 +158,7 @@ func TestForwardingSupervisorDetachStopsOldSessionAndNewSessionWorks(t *testing.
 	defer cancel()
 
 	device := newTestTunnelDevice()
-	supervisor := newForwardingSupervisor(ctx, device, &TunnelStats{}, NewNetBuffer(2048))
+	supervisor := newForwardingSupervisor(ctx, device, NewNetBuffer(2048))
 	t.Cleanup(func() {
 		device.Close()
 		supervisor.Close()
@@ -245,7 +245,7 @@ func TestForwardingSupervisorICMPInjectionDoesNotBlockDevicePump(t *testing.T) {
 
 	base := newTestTunnelDevice()
 	device := &writeNeedsReaderDevice{testTunnelDevice: base}
-	supervisor := newForwardingSupervisor(ctx, device, &TunnelStats{}, NewNetBuffer(2048))
+	supervisor := newForwardingSupervisor(ctx, device, NewNetBuffer(2048))
 	t.Cleanup(func() {
 		base.Close()
 		supervisor.Close()

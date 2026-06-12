@@ -28,11 +28,9 @@ func (noopTunnelDevice) WritePacket(pkt []byte) error {
 func TestHandleConnectionOnDisconnectedAfterEstablished(t *testing.T) {
 	oldConnectTunnelFunc := connectTunnelFunc
 	oldHandleForwardingFn := handleForwardingFn
-	oldRunSelfCheckLoopFn := runSelfCheckLoopFn
 	defer func() {
 		connectTunnelFunc = oldConnectTunnelFunc
 		handleForwardingFn = oldHandleForwardingFn
-		runSelfCheckLoopFn = oldRunSelfCheckLoopFn
 	}()
 
 	connectTunnelFunc = func(
@@ -60,7 +58,6 @@ func TestHandleConnectionOnDisconnectedAfterEstablished(t *testing.T) {
 		InitialPacketSize: 1242,
 		Endpoint:          &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 443},
 		MTU:               1280,
-		SelfCheckEnabled:  false,
 		OnConnected: func() {
 			connectedCount++
 		},
@@ -70,7 +67,7 @@ func TestHandleConnectionOnDisconnectedAfterEstablished(t *testing.T) {
 		},
 	}
 
-	attempt, err := handleConnection(context.Background(), cfg, noopTunnelDevice{}, &TunnelStats{}, 0)
+	attempt, err := handleConnection(context.Background(), cfg, noopTunnelDevice{}, 0)
 	if !errors.Is(err, forwardErr) {
 		t.Fatalf("expected forwarding error, got: %v", err)
 	}
@@ -91,11 +88,9 @@ func TestHandleConnectionOnDisconnectedAfterEstablished(t *testing.T) {
 func TestHandleConnectionNoOnDisconnectedBeforeEstablished(t *testing.T) {
 	oldConnectTunnelFunc := connectTunnelFunc
 	oldHandleForwardingFn := handleForwardingFn
-	oldRunSelfCheckLoopFn := runSelfCheckLoopFn
 	defer func() {
 		connectTunnelFunc = oldConnectTunnelFunc
 		handleForwardingFn = oldHandleForwardingFn
-		runSelfCheckLoopFn = oldRunSelfCheckLoopFn
 	}()
 
 	connectTunnelFunc = func(
@@ -115,13 +110,12 @@ func TestHandleConnectionNoOnDisconnectedBeforeEstablished(t *testing.T) {
 		InitialPacketSize: 1242,
 		Endpoint:          &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 443},
 		MTU:               1280,
-		SelfCheckEnabled:  false,
 		OnDisconnected: func(err error) {
 			disconnectedCount++
 		},
 	}
 
-	attempt, err := handleConnection(context.Background(), cfg, noopTunnelDevice{}, &TunnelStats{}, 0)
+	attempt, err := handleConnection(context.Background(), cfg, noopTunnelDevice{}, 0)
 	if err == nil {
 		t.Fatalf("expected handshake failure")
 	}
@@ -139,11 +133,9 @@ func TestHandleConnectionNoOnDisconnectedBeforeEstablished(t *testing.T) {
 func TestHandleConnectionUsesEndpointSelectorPerAttempt(t *testing.T) {
 	oldConnectTunnelFunc := connectTunnelFunc
 	oldHandleForwardingFn := handleForwardingFn
-	oldRunSelfCheckLoopFn := runSelfCheckLoopFn
 	defer func() {
 		connectTunnelFunc = oldConnectTunnelFunc
 		handleForwardingFn = oldHandleForwardingFn
-		runSelfCheckLoopFn = oldRunSelfCheckLoopFn
 	}()
 
 	var dialed []string
@@ -174,11 +166,10 @@ func TestHandleConnectionUsesEndpointSelectorPerAttempt(t *testing.T) {
 			return picked
 		},
 		MTU:              1280,
-		SelfCheckEnabled: false,
 	}
 
-	_, _ = handleConnection(context.Background(), cfg, noopTunnelDevice{}, &TunnelStats{}, 0)
-	_, _ = handleConnection(context.Background(), cfg, noopTunnelDevice{}, &TunnelStats{}, 1)
+	_, _ = handleConnection(context.Background(), cfg, noopTunnelDevice{}, 0)
+	_, _ = handleConnection(context.Background(), cfg, noopTunnelDevice{}, 1)
 
 	if selectorCalls != 2 {
 		t.Fatalf("expected selector to be called per attempt, got %d", selectorCalls)

@@ -1038,8 +1038,6 @@ func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint *net.UDPAdd
 		EndpointSelector:     endpointSelector,
 		MTU:                  mtu,
 		MaxReconnectAttempts: maxReconnectAttempts,
-		SelfCheckEnabled:     config.AppConfig.Socks.SelfCheck,
-		SelfCheckDialFunc:    tunNet.DialContext,
 		ReconnectStrategy: &api.ExponentialBackoff{
 			InitialDelay: reconnectDelay,
 			MaxDelay:     5 * time.Minute,

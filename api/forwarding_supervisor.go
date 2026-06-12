@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -36,12 +35,16 @@ func (s *forwardSession) close() {
 	})
 }
 
+// forwardingSupervisor owns a single, long-lived device→IP pump (and ICMP
+// injector) for the whole process. Reconnects only swap the active IP
+// connection underneath it via attach(); the TUN reader is never torn down.
+// This avoids the "stale TUN reader" problem that a per-cycle pump model has
+// to paper over with a serializing mutex and a shutdown grace window.
 type forwardingSupervisor struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
 	device  TunnelDevice
-	stats   *TunnelStats
 	bufPool *NetBuffer
 
 	mu     sync.RWMutex
@@ -53,7 +56,7 @@ type forwardingSupervisor struct {
 	wg        sync.WaitGroup
 }
 
-func newForwardingSupervisor(parentCtx context.Context, device TunnelDevice, stats *TunnelStats, bufPool *NetBuffer) *forwardingSupervisor {
+func newForwardingSupervisor(parentCtx context.Context, device TunnelDevice, bufPool *NetBuffer) *forwardingSupervisor {
 	ctx, cancel := context.WithCancel(parentCtx)
 	if bufPool == nil {
 		bufPool = NewNetBuffer(1280)
@@ -62,7 +65,6 @@ func newForwardingSupervisor(parentCtx context.Context, device TunnelDevice, sta
 		ctx:     ctx,
 		cancel:  cancel,
 		device:  device,
-		stats:   stats,
 		bufPool: bufPool,
 		icmpCh:  make(chan []byte, 32),
 	}
@@ -157,10 +159,6 @@ func (s *forwardingSupervisor) reportSessionError(session *forwardSession, err e
 func (s *forwardingSupervisor) runDeviceToIP() {
 	defer s.wg.Done()
 
-	errStreak := 0
-	var backoff time.Duration
-	var lastSessionID uint64
-
 	for {
 		select {
 		case <-s.ctx.Done():
@@ -176,60 +174,39 @@ func (s *forwardingSupervisor) runDeviceToIP() {
 			if s.ctx.Err() != nil {
 				return
 			}
-
 			if session := s.activeSession(); session != nil {
 				s.reportSessionError(session, fmt.Errorf("failed to read from TUN device: %v", err))
 			}
-			if !sleepWithBackoff(s.ctx, &backoff) {
+			// Device read errors realistically only happen on shutdown; the
+			// short pause just guards against a busy-loop if one slips through
+			// while the supervisor is still live.
+			select {
+			case <-s.ctx.Done():
 				return
+			case <-time.After(100 * time.Millisecond):
 			}
 			continue
 		}
 
-		s.stats.RecordPacketOut(n)
+		// Drop outbound packets while there is no usable session (no tunnel yet,
+		// or the active one is being torn down for a reconnect). Reading and
+		// discarding keeps the netstack device drained so it never blocks.
 		session := s.activeSession()
-		if session == nil {
-			errStreak = 0
-			backoff = 0
-			lastSessionID = 0
+		if session == nil || session.ctx.Err() != nil {
 			s.bufPool.PutBuf(buf)
 			continue
-		}
-
-		if session.id != lastSessionID {
-			errStreak = 0
-			backoff = 0
-			lastSessionID = session.id
 		}
 
 		icmp, err := session.conn.WritePacket((*buf)[:n])
+		s.bufPool.PutBuf(buf)
 		if err != nil {
-			s.bufPool.PutBuf(buf)
-			if !s.isActiveSession(session) {
-				continue
-			}
-			if errors.As(err, new(*connectip.CloseError)) {
-				s.reportSessionError(session, fmt.Errorf("connection closed while writing to IP connection: %v", err))
-				continue
-			}
-
-			errStreak++
-			if errStreak >= forwardingErrStreakThreshold {
-				s.reportSessionError(session, fmt.Errorf("too many write errors to IP connection: %w", err))
-				continue
-			}
-			if errStreak == 1 {
-				slog.Debug("error writing to IP connection", "error", err, "streak", errStreak)
-			}
-			if !sleepWithBackoff(s.ctx, &backoff) {
-				return
+			// Any write error means this IP connection is unusable; signal a
+			// reconnect (unless this session was already superseded).
+			if s.isActiveSession(session) {
+				s.reportSessionError(session, fmt.Errorf("error writing to IP connection: %w", err))
 			}
 			continue
 		}
-
-		errStreak = 0
-		backoff = 0
-		s.bufPool.PutBuf(buf)
 
 		if len(icmp) > 0 {
 			// Never inject the ICMP packet from this goroutine: it is the sole
@@ -260,18 +237,13 @@ func (s *forwardingSupervisor) runICMPInjector() {
 		case pkt := <-s.icmpCh:
 			if err := s.device.WritePacket(pkt); err != nil {
 				slog.Debug("error writing ICMP to TUN device; continuing", "error", err)
-				continue
 			}
-			s.stats.RecordPacketIn(len(pkt))
 		}
 	}
 }
 
 func (s *forwardingSupervisor) runIPToDevice(session *forwardSession) {
 	defer s.wg.Done()
-
-	errStreak := 0
-	var backoff time.Duration
 
 	for {
 		select {
@@ -287,31 +259,12 @@ func (s *forwardingSupervisor) runIPToDevice(session *forwardSession) {
 			if session.ctx.Err() != nil {
 				return
 			}
-			if errors.As(err, new(*connectip.CloseError)) {
-				if s.isActiveSession(session) {
-					s.reportSessionError(session, fmt.Errorf("connection closed while reading from IP connection: %v", err))
-				}
-				return
+			if s.isActiveSession(session) {
+				s.reportSessionError(session, fmt.Errorf("error reading from IP connection: %w", err))
 			}
-
-			errStreak++
-			if errStreak >= forwardingErrStreakThreshold {
-				s.reportSessionError(session, fmt.Errorf("too many read errors from IP connection: %w", err))
-				return
-			}
-			if errStreak == 1 {
-				slog.Debug("error reading from IP connection", "error", err, "streak", errStreak)
-			}
-			if !sleepWithBackoff(session.ctx, &backoff) {
-				return
-			}
-			continue
+			return
 		}
 
-		errStreak = 0
-		backoff = 0
-
-		s.stats.RecordPacketIn(n)
 		if err := s.device.WritePacket((*buf)[:n]); err != nil {
 			s.bufPool.PutBuf(buf)
 			s.reportSessionError(session, fmt.Errorf("failed to write to TUN device: %v", err))

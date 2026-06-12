@@ -9,23 +9,15 @@ import (
 	"math/rand"
 	"net"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/HynoR/uscf/internal"
 	"golang.zx2c4.com/wireguard/tun"
 )
 
-const (
-	forwardingErrStreakThreshold = 5
-	forwardingErrBackoffBase     = 50 * time.Millisecond
-	forwardingErrBackoffMax      = 2 * time.Second
-)
-
 var (
 	connectTunnelFunc  = ConnectTunnel
 	handleForwardingFn = handleForwarding
-	runSelfCheckLoopFn = runSelfCheckLoop
 )
 
 // NetBuffer is a pool of byte slices with a fixed capacity.
@@ -93,46 +85,6 @@ type TunnelDevice interface {
 	WritePacket(pkt []byte) error
 }
 
-// TunnelStats 用于跟踪隧道性能指标
-// 所有字段都使用原子操作，无需加锁
-type TunnelStats struct {
-	PacketsIn       uint64
-	PacketsOut      uint64
-	BytesIn         uint64
-	BytesOut        uint64
-	Errors          uint64
-	HandShake       uint64
-	LastReconnectNs int64 // Unix 纳秒时间戳
-}
-
-func (s *TunnelStats) RecordPacketIn(bytes int) {
-	atomic.AddUint64(&s.PacketsIn, 1)
-	atomic.AddUint64(&s.BytesIn, uint64(bytes))
-}
-
-func (s *TunnelStats) RecordPacketOut(bytes int) {
-	atomic.AddUint64(&s.PacketsOut, 1)
-	atomic.AddUint64(&s.BytesOut, uint64(bytes))
-}
-
-func (s *TunnelStats) RecordError() {
-	atomic.AddUint64(&s.Errors, 1)
-}
-
-func (s *TunnelStats) RecordHandShake() {
-	atomic.AddUint64(&s.HandShake, 1)
-	atomic.StoreInt64(&s.LastReconnectNs, time.Now().UnixNano())
-}
-
-// GetLastReconnect 返回最后一次重连的时间
-func (s *TunnelStats) GetLastReconnect() time.Time {
-	ns := atomic.LoadInt64(&s.LastReconnectNs)
-	if ns == 0 {
-		return time.Time{}
-	}
-	return time.Unix(0, ns)
-}
-
 // NetstackAdapter wraps a tun.Device (e.g. from netstack) to satisfy TunnelDevice.
 type NetstackAdapter struct {
 	dev            tun.Device
@@ -195,8 +147,6 @@ type ConnectionConfig struct {
 	EndpointSelector     func() *net.UDPAddr // Optional endpoint selector invoked for each connection attempt.
 	MTU                  int
 	MaxReconnectAttempts int // 连续连接失败达到阈值后暂停重连；0表示无限重试
-	SelfCheckEnabled     bool
-	SelfCheckDialFunc    func(ctx context.Context, network, addr string) (net.Conn, error)
 	ReconnectStrategy    BackoffStrategy
 	OnConnected          func()          // Optional callback after MASQUE connection is established.
 	OnDisconnected       func(err error) // Optional callback after an established MASQUE connection is lost.
@@ -243,71 +193,14 @@ func (b *ExponentialBackoff) Reset() {
 	// 重置状态（如果需要）
 }
 
-func sleepWithBackoff(ctx context.Context, backoff *time.Duration) bool {
-	if *backoff <= 0 {
-		*backoff = forwardingErrBackoffBase
-	} else if *backoff < forwardingErrBackoffMax {
-		*backoff *= 2
-		if *backoff > forwardingErrBackoffMax {
-			*backoff = forwardingErrBackoffMax
-		}
-	}
-
-	timer := time.NewTimer(*backoff)
-	defer timer.Stop()
-
-	select {
-	case <-ctx.Done():
-		return false
-	case <-timer.C:
-		return true
-	}
-}
-
-// monitorStats 监控统计信息
-func monitorStats(ctx context.Context, stats *TunnelStats) {
-	ticker := time.NewTicker(300 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			packetsIn := atomic.LoadUint64(&stats.PacketsIn)
-			packetsOut := atomic.LoadUint64(&stats.PacketsOut)
-			bytesIn := atomic.LoadUint64(&stats.BytesIn)
-			bytesOut := atomic.LoadUint64(&stats.BytesOut)
-			errors := atomic.LoadUint64(&stats.Errors)
-			handShake := atomic.LoadUint64(&stats.HandShake)
-
-			slog.Debug(
-				"tunnel stats",
-				"packets_in",
-				packetsIn,
-				"bytes_in",
-				bytesIn,
-				"packets_out",
-				packetsOut,
-				"bytes_out",
-				bytesOut,
-				"errors",
-				errors,
-				"handshake",
-				handShake,
-			)
-		}
-	}
-}
-
 // handleConnection 处理单次连接
-func handleConnection(ctx context.Context, config ConnectionConfig, device TunnelDevice, stats *TunnelStats, reconnectAttempt int) (nextAttempt int, err error) {
-	forwarding := newForwardingSupervisor(ctx, device, stats, nil)
+func handleConnection(ctx context.Context, config ConnectionConfig, device TunnelDevice, reconnectAttempt int) (nextAttempt int, err error) {
+	forwarding := newForwardingSupervisor(ctx, device, nil)
 	defer forwarding.Close()
-	return handleConnectionWithForwarding(ctx, config, forwarding, stats, reconnectAttempt)
+	return handleConnectionWithForwarding(ctx, config, forwarding, reconnectAttempt)
 }
 
-func handleConnectionWithForwarding(ctx context.Context, config ConnectionConfig, forwarding *forwardingSupervisor, stats *TunnelStats, reconnectAttempt int) (nextAttempt int, err error) {
+func handleConnectionWithForwarding(ctx context.Context, config ConnectionConfig, forwarding *forwardingSupervisor, reconnectAttempt int) (nextAttempt int, err error) {
 	connected := false
 	defer func() {
 		if connected && config.OnDisconnected != nil {
@@ -357,11 +250,9 @@ func handleConnectionWithForwarding(ctx context.Context, config ConnectionConfig
 	}()
 
 	if rsp.StatusCode != 200 {
-		stats.RecordError()
 		return reconnectAttempt + 1, fmt.Errorf("tunnel connection failed: %s", rsp.Status)
 	}
 
-	stats.RecordHandShake()
 	slog.Info("connected to MASQUE server")
 	connected = true
 	if config.OnConnected != nil {
@@ -372,35 +263,16 @@ func handleConnectionWithForwarding(ctx context.Context, config ConnectionConfig
 	forwardingCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	go monitorStats(forwardingCtx, stats)
-
 	forwardingErrCh := make(chan error, 1)
 	go func() {
 		forwardingErrCh <- handleForwardingFn(forwardingCtx, forwarding, ipConn)
 	}()
 
-	var selfCheckErrCh <-chan error
-	if config.SelfCheckEnabled {
-		ch := make(chan error, 1)
-		selfCheckErrCh = ch
-		go func() {
-			ch <- runSelfCheckLoopFn(forwardingCtx, config.SelfCheckDialFunc)
-		}()
-	}
-
 	select {
 	case err = <-forwardingErrCh:
 		if err != nil && !errors.Is(err, context.Canceled) {
 			slog.Warn("forwarding error", "error", err)
-			stats.RecordError()
 		}
-		return 0, err
-	case err = <-selfCheckErrCh:
-		if err != nil && !errors.Is(err, context.Canceled) {
-			slog.Warn("self-check triggered reconnect", "error", err)
-			stats.RecordError()
-		}
-		cancel()
 		return 0, err
 	case <-ctx.Done():
 		return 0, ctx.Err()
@@ -408,11 +280,10 @@ func handleConnectionWithForwarding(ctx context.Context, config ConnectionConfig
 }
 
 func MaintainTunnel(ctx context.Context, config ConnectionConfig, device TunnelDevice) {
-	stats := &TunnelStats{}
 	reconnectAttempt := 0
 	var err error
 	bufPool := NewNetBuffer(config.MTU)
-	forwarding := newForwardingSupervisor(ctx, device, stats, bufPool)
+	forwarding := newForwardingSupervisor(ctx, device, bufPool)
 	defer forwarding.Close()
 
 	for {
@@ -423,7 +294,7 @@ func MaintainTunnel(ctx context.Context, config ConnectionConfig, device TunnelD
 		default:
 		}
 
-		reconnectAttempt, err = handleConnectionWithForwarding(ctx, config, forwarding, stats, reconnectAttempt)
+		reconnectAttempt, err = handleConnectionWithForwarding(ctx, config, forwarding, reconnectAttempt)
 		if ctx.Err() != nil {
 			return
 		}
