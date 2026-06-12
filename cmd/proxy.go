@@ -25,9 +25,9 @@ import (
 	"github.com/HynoR/uscf/api"
 	"github.com/HynoR/uscf/config"
 	"github.com/HynoR/uscf/internal"
+	"github.com/HynoR/uscf/internal/netstack"
 	"github.com/spf13/cobra"
 	"golang.zx2c4.com/wireguard/tun"
-	"golang.zx2c4.com/wireguard/tun/netstack"
 )
 
 // proxyCmd 命令，结合 socks 和 register 的功能
@@ -1030,12 +1030,12 @@ func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint *net.UDPAdd
 	drainGrace := config.AppConfig.Socks.DrainGrace.Duration()
 
 	configTunnel := api.ConnectionConfig{
-		TLSConfig:            tlsConfig,
-		KeepAlivePeriod:      keepalivePeriod,
-		InitialPacketSize:    initialPacketSize,
-		Endpoint:             endpoint,
-		EndpointSelector:     endpointSelector,
-		MTU:                  mtu,
+		TLSConfig:              tlsConfig,
+		KeepAlivePeriod:        keepalivePeriod,
+		InitialPacketSize:      initialPacketSize,
+		Endpoint:               endpoint,
+		EndpointSelector:       endpointSelector,
+		MTU:                    mtu,
 		MaxReconnectAttempts:   maxReconnectAttempts,
 		AlwaysReconnect:        config.AppConfig.Socks.AlwaysReconnect,
 		WaitForReconnectDemand: socksRuntime.WaitForReconnectDemand,

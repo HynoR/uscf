@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/HynoR/uscf/internal/netstack"
 	"golang.org/x/sync/singleflight"
-	"golang.zx2c4.com/wireguard/tun/netstack"
 )
 
 // NameResolver matches the socks5.NameResolver interface without importing go-socks5.
