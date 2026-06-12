@@ -29,8 +29,8 @@ Published Docker tags:
 
 Preview tags are maintainer-facing only:
 
-- usque preview: `dev-<sha>`
-- wg preview: `wg-dev-<sha>`
+- usque preview: `dev`, commit-scoped tags such as `dev-<sha>`
+- wg preview: `wg-dev`, commit-scoped tags such as `wg-dev-<sha>`
 
 ## Five-Minute Usque Deployment
 
@@ -254,7 +254,7 @@ Preview image publication rules for maintainers:
 
 - `main` branch pushes validate Docker builds but do not publish images.
 - Version tags pushed from the release flow publish stable tags for both regular and WG images.
-- `dev` branch pushes publish commit-scoped preview tags only: `dev-<sha>` and `wg-dev-<sha>`.
+- `dev` branch pushes publish moving preview tags `dev` and `wg-dev`, plus commit-scoped preview tags `dev-<sha>` and `wg-dev-<sha>`.
 
 ## Build From Source
 

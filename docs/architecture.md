@@ -60,5 +60,5 @@ In both modes, Docker restart policy is the outer recovery mechanism. The usque 
 ## Release Channels
 
 - Stable customer images come only from version tags on `main`: `latest`, `<version>`, `wg-latest`, and `wg-<version>`.
-- Internal preview images come only from `dev` branch commits: `dev-<sha>` and `wg-dev-<sha>`.
+- Internal preview images come only from `dev` branch commits: moving tags `dev` and `wg-dev`, plus commit-scoped tags `dev-<sha>` and `wg-dev-<sha>`.
 - `main` branch pushes without a version tag validate the Docker targets but do not publish images.

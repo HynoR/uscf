@@ -90,6 +90,8 @@ analyze_bucket() {
     def protected_tag:
       . == "latest" or
       . == "wg-latest" or
+      . == "dev" or
+      . == "wg-dev" or
       test("^[0-9]+\\.[0-9]+(?:\\.[0-9]+)?(?:[-+][A-Za-z0-9._-]+)?$") or
       test("^wg-[0-9]+\\.[0-9]+(?:\\.[0-9]+)?(?:[-+][A-Za-z0-9._-]+)?$");
     def deletable_for_bucket:
