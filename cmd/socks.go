@@ -110,7 +110,7 @@ func prepareDirectSocksRuntime(connectionTimeout, idleTimeout time.Duration) (*s
 			dialWithTarget := func(ctx context.Context, network, addr string, target socksTarget) (net.Conn, error) {
 				return dialFunc(ctx, network, addr)
 			}
-			return createSocksServer(username, password, localResolver, dialWithTarget, verbose)
+			return createSocksServer(username, password, localResolver, dialWithTarget, idleTimeout, verbose)
 		},
 	)
 	runtime.SetTunnelUp(true)

@@ -9,10 +9,19 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/HynoR/uscf/api"
 	"github.com/txthinking/socks5"
 )
+
+// maxConcurrentUDPUpstreams bounds the total number of live upstream UDP
+// connections across all associations served by one adapter. Each upstream
+// holds a socket, a relay goroutine and a read buffer, so an unbounded count is
+// an OOM / file-descriptor exhaustion vector when a client (or an injected
+// source) fans datagrams out to many distinct destinations. Datagrams to a new
+// destination are dropped once the cap is reached; the client simply retries.
+const maxConcurrentUDPUpstreams = 1024
 
 // targetDialFunc dials an upstream connection for an already-resolved address,
 // while still receiving the original (pre-resolution) target so that routing
@@ -36,9 +45,18 @@ type txthinkingAdapter struct {
 	dial     targetDialFunc
 	bufPool  *api.NetBuffer
 	verbose  bool
+
+	// idleTimeout reclaims a UDP association after this long without any UDP
+	// activity. Zero disables the reaper. TCP relays are bounded separately by
+	// the per-connection models.TimeoutConn deadlines applied at dial time.
+	idleTimeout time.Duration
+
+	// udpSem is a counting semaphore bounding live upstream UDP connections to
+	// maxConcurrentUDPUpstreams across all associations served by this adapter.
+	udpSem chan struct{}
 }
 
-func newTxthinkingAdapter(username, password string, resolver api.NameResolver, dial targetDialFunc, verbose bool) *txthinkingAdapter {
+func newTxthinkingAdapter(username, password string, resolver api.NameResolver, dial targetDialFunc, idleTimeout time.Duration, verbose bool) *txthinkingAdapter {
 	method := socks5.MethodNone
 	if username != "" && password != "" {
 		method = socks5.MethodUsernamePassword
@@ -50,10 +68,32 @@ func newTxthinkingAdapter(username, password string, resolver api.NameResolver, 
 			Password:          password,
 			SupportedCommands: []byte{socks5.CmdConnect, socks5.CmdUDP},
 		},
-		resolver: resolver,
-		dial:     dial,
-		bufPool:  api.NewNetBuffer(32 * 1024),
-		verbose:  verbose,
+		resolver:    resolver,
+		dial:        dial,
+		bufPool:     api.NewNetBuffer(32 * 1024),
+		verbose:     verbose,
+		idleTimeout: idleTimeout,
+		udpSem:      make(chan struct{}, maxConcurrentUDPUpstreams),
+	}
+}
+
+// acquireUDPSlot reserves one upstream-UDP-connection slot, returning false when
+// the adapter is already at maxConcurrentUDPUpstreams.
+func (a *txthinkingAdapter) acquireUDPSlot() bool {
+	select {
+	case a.udpSem <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+// releaseUDPSlot returns one slot. Non-blocking so an accidental double-release
+// can never deadlock a relay goroutine; pairing is kept exact by countedConn.
+func (a *txthinkingAdapter) releaseUDPSlot() {
+	select {
+	case <-a.udpSem:
+	default:
 	}
 }
 
@@ -112,24 +152,37 @@ func (a *txthinkingAdapter) handleConnect(conn net.Conn, req *socks5.Request) er
 	return a.relayTCP(conn, upstream)
 }
 
-// relayTCP copies bytes between the client and the upstream until either side
-// closes, using pooled buffers so models.TimeoutConn deadline bookkeeping runs.
+// relayTCP copies bytes in both directions until BOTH halves finish. Each
+// direction signals a TCP half-close to its destination when its source EOFs,
+// so a peer that closes only its write side (e.g. an HTTP client that finished
+// the request but still awaits the response) is not torn down prematurely. Both
+// ends carry a models.TimeoutConn idle deadline, so a half-open direction that
+// goes silent is still reclaimed rather than hanging forever.
 func (a *txthinkingAdapter) relayTCP(client, upstream net.Conn) error {
 	errc := make(chan error, 2)
-	go func() { errc <- a.copyBuffered(upstream, client) }()
-	go func() { errc <- a.copyBuffered(client, upstream) }()
+	go func() { errc <- a.copyHalf(upstream, client) }() // client -> upstream
+	go func() { errc <- a.copyHalf(client, upstream) }() // upstream -> client
 
-	first := <-errc
+	err1 := <-errc
+	err2 := <-errc
 	_ = client.Close()
 	_ = upstream.Close()
-	<-errc
-	return first
+	if err1 != nil {
+		return err1
+	}
+	return err2
 }
 
-func (a *txthinkingAdapter) copyBuffered(dst, src net.Conn) error {
+// copyHalf copies src->dst with a pooled buffer (so models.TimeoutConn deadline
+// bookkeeping runs), then half-closes dst's write side so the peer observes a
+// clean EOF instead of a reset when only one direction has finished.
+func (a *txthinkingAdapter) copyHalf(dst, src net.Conn) error {
 	buf := a.bufPool.GetBuf()
 	defer a.bufPool.PutBuf(buf)
 	_, err := io.CopyBuffer(dst, src, *buf)
+	if cw, ok := dst.(interface{ CloseWrite() error }); ok {
+		_ = cw.CloseWrite()
+	}
 	return err
 }
 
@@ -213,19 +266,30 @@ func (a *txthinkingAdapter) handleAssociate(conn net.Conn, req *socks5.Request) 
 	}
 
 	assoc := &udpAssociation{
-		adapter:   a,
-		relay:     relay,
-		upstreams: make(map[string]net.Conn),
+		adapter:     a,
+		relay:       relay,
+		controlConn: conn,
+		expectedIP:  clientIP(conn),
+		upstreams:   make(map[string]net.Conn),
+		done:        make(chan struct{}),
 	}
-	defer assoc.closeAll()
+	assoc.touch()
+	defer assoc.close()
 
 	// The association lives as long as the TCP control connection. When the
-	// client closes it (or the runtime drains it on tunnel-down), unblock the
-	// read loop below by closing the relay socket.
+	// client closes it (or the runtime drains it on tunnel-down), tear the
+	// association down. Idle-read timeouts on the (deliberately silent) control
+	// channel are ignored here: an active UDP flow must not be killed just
+	// because no TCP bytes arrived — association idleness is judged from UDP
+	// activity by idleReaper instead.
 	go func() {
-		_, _ = io.Copy(io.Discard, conn)
-		_ = relay.Close()
+		drainControlConn(conn)
+		assoc.close()
 	}()
+
+	if a.idleTimeout > 0 {
+		go assoc.idleReaper(a.idleTimeout)
+	}
 
 	buf := make([]byte, 65535)
 	for {
@@ -233,24 +297,99 @@ func (a *txthinkingAdapter) handleAssociate(conn net.Conn, req *socks5.Request) 
 		if err != nil {
 			return nil
 		}
+		// Only relay datagrams whose source IP matches the client that
+		// authenticated the TCP control connection. Without this, anything that
+		// can reach the relay port could use it as an open UDP relay through the
+		// tunnel and could hijack where responses are sent.
+		if !assoc.allowSource(clientAddr) {
+			if a.verbose {
+				slog.Warn("dropping UDP datagram from unauthorized source", "src", clientAddr.String(), "expected_ip", assoc.expectedIP.String())
+			}
+			continue
+		}
 		d, err := socks5.NewDatagramFromBytes(buf[:n])
 		if err != nil || d.Frag != 0x00 {
 			continue
 		}
+		assoc.touch()
 		assoc.forwardFromClient(clientAddr, d)
 	}
 }
 
-// udpAssociation tracks the relay socket, the latest client source address and
-// one upstream connection per destination for a single UDP ASSOCIATE.
+// drainControlConn reads and discards from the UDP-ASSOCIATE TCP control
+// connection until it closes, ignoring idle-read timeouts (the control channel
+// is silent by design while UDP data flows). Returns on EOF or any non-timeout
+// error so the association is torn down when the client really goes away.
+func drainControlConn(conn net.Conn) {
+	buf := make([]byte, 512)
+	for {
+		if _, err := conn.Read(buf); err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				continue
+			}
+			return
+		}
+	}
+}
+
+// udpAssociation tracks the relay socket, the controlling TCP connection, the
+// latest client source address and one upstream connection per destination for
+// a single UDP ASSOCIATE.
 type udpAssociation struct {
-	adapter    *txthinkingAdapter
-	relay      *net.UDPConn
-	clientAddr atomic.Pointer[net.UDPAddr]
+	adapter     *txthinkingAdapter
+	relay       *net.UDPConn
+	controlConn net.Conn
+	// expectedIP is the IP of the client that opened the TCP control connection.
+	// Datagrams from other source IPs are rejected (see allowSource). Nil when
+	// the client address could not be determined, in which case all sources are
+	// accepted to preserve availability.
+	expectedIP   net.IP
+	clientAddr   atomic.Pointer[net.UDPAddr]
+	lastActivity atomic.Int64 // unix ns of last UDP datagram in either direction
 
 	mu        sync.Mutex
 	upstreams map[string]net.Conn
 	closed    bool
+	done      chan struct{}
+}
+
+// touch records UDP activity so idleReaper can tell a live association from a
+// stale one.
+func (assoc *udpAssociation) touch() {
+	assoc.lastActivity.Store(time.Now().UnixNano())
+}
+
+// allowSource reports whether a datagram from addr may be relayed: its IP must
+// match the client that authenticated the control connection.
+func (assoc *udpAssociation) allowSource(addr *net.UDPAddr) bool {
+	if assoc.expectedIP == nil || addr == nil {
+		return true
+	}
+	return assoc.expectedIP.Equal(addr.IP)
+}
+
+// idleReaper closes the association once no UDP datagram has flowed in either
+// direction for idleTimeout, reclaiming the relay socket, upstreams and the
+// control connection so a walked-away client cannot pin resources indefinitely.
+func (assoc *udpAssociation) idleReaper(idleTimeout time.Duration) {
+	interval := idleTimeout / 2
+	if interval < time.Second {
+		interval = time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-assoc.done:
+			return
+		case <-ticker.C:
+			if time.Now().UnixNano()-assoc.lastActivity.Load() > int64(idleTimeout) {
+				slog.Debug("reclaiming idle UDP association", "idle_timeout", idleTimeout)
+				assoc.close()
+				return
+			}
+		}
+	}
 }
 
 func (assoc *udpAssociation) forwardFromClient(clientAddr *net.UDPAddr, d *socks5.Datagram) {
@@ -285,11 +424,23 @@ func (assoc *udpAssociation) forwardFromClient(clientAddr *net.UDPAddr, d *socks
 		return
 	}
 
-	up, err = assoc.adapter.dial(ctx, "udp", dialAddr, target)
-	if err != nil {
-		// e.g. block_udp_443 or tunnel down: silently drop, the client retries.
+	// Bound concurrent upstream UDP connections so a client (or an injected
+	// source) fanning out to many destinations cannot exhaust memory/FDs.
+	if !assoc.adapter.acquireUDPSlot() {
+		if assoc.adapter.verbose {
+			slog.Warn("UDP upstream limit reached; dropping datagram", "dst", dst)
+		}
 		return
 	}
+	rawUp, err := assoc.adapter.dial(ctx, "udp", dialAddr, target)
+	if err != nil {
+		// e.g. block_udp_443 or tunnel down: silently drop, the client retries.
+		assoc.adapter.releaseUDPSlot()
+		return
+	}
+	// countedConn releases the slot exactly once when the upstream is closed,
+	// whichever teardown path (discard below, removeUpstream, or close) closes it.
+	up = &countedConn{Conn: rawUp, release: assoc.adapter.releaseUDPSlot}
 
 	assoc.mu.Lock()
 	if assoc.closed {
@@ -337,6 +488,7 @@ func (assoc *udpAssociation) relayFromUpstream(dst string, up net.Conn) {
 		if clientAddr == nil {
 			continue
 		}
+		assoc.touch()
 		datagram := socks5.NewDatagram(atyp, addr, port, buf[:n])
 		if _, err := assoc.relay.WriteToUDP(datagram.Bytes(), clientAddr); err != nil {
 			return
@@ -353,9 +505,18 @@ func (assoc *udpAssociation) removeUpstream(dst string, up net.Conn) {
 	_ = up.Close()
 }
 
-func (assoc *udpAssociation) closeAll() {
+// close tears the association down once: it stops the relay socket (unblocking
+// the read loop), closes the TCP control connection (unblocking drainControlConn
+// and the idleReaper) and closes every upstream. Idempotent across the read
+// loop's defer, the control-conn watcher and the idle reaper.
+func (assoc *udpAssociation) close() {
 	assoc.mu.Lock()
+	if assoc.closed {
+		assoc.mu.Unlock()
+		return
+	}
 	assoc.closed = true
+	close(assoc.done)
 	conns := make([]net.Conn, 0, len(assoc.upstreams))
 	for dst, up := range assoc.upstreams {
 		conns = append(conns, up)
@@ -363,9 +524,29 @@ func (assoc *udpAssociation) closeAll() {
 	}
 	assoc.mu.Unlock()
 
+	if assoc.relay != nil {
+		_ = assoc.relay.Close()
+	}
+	if assoc.controlConn != nil {
+		_ = assoc.controlConn.Close()
+	}
 	for _, up := range conns {
 		_ = up.Close()
 	}
+}
+
+// countedConn releases a UDP-upstream semaphore slot exactly once, when the
+// connection is closed, no matter which teardown path closes it.
+type countedConn struct {
+	net.Conn
+	release func()
+	once    sync.Once
+}
+
+func (c *countedConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(c.release)
+	return err
 }
 
 // localIP returns the local IP of the (TCP) control connection so the UDP relay
@@ -383,6 +564,27 @@ func localIP(conn net.Conn) net.IP {
 	}
 	if host, _, err := net.SplitHostPort(conn.LocalAddr().String()); err == nil {
 		return net.ParseIP(host)
+	}
+	return nil
+}
+
+// clientIP returns the remote IP of the (TCP) control connection: the client
+// authorized to drive this UDP association. Used to filter relay datagrams by
+// source. Returns nil when it cannot be determined.
+func clientIP(conn net.Conn) net.IP {
+	if conn == nil {
+		return nil
+	}
+	switch addr := conn.RemoteAddr().(type) {
+	case *net.TCPAddr:
+		return addr.IP
+	case *net.UDPAddr:
+		return addr.IP
+	}
+	if remote := conn.RemoteAddr(); remote != nil {
+		if host, _, err := net.SplitHostPort(remote.String()); err == nil {
+			return net.ParseIP(host)
+		}
 	}
 	return nil
 }

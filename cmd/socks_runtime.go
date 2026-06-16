@@ -284,3 +284,12 @@ func (c *managedConn) Close() error {
 	})
 	return err
 }
+
+// CloseWrite forwards a half-close to the wrapped connection so graceful TCP
+// half-close survives the managed wrapper. Returns nil if unsupported.
+func (c *managedConn) CloseWrite() error {
+	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return nil
+}

@@ -41,3 +41,15 @@ func (c *TimeoutConn) Write(b []byte) (int, error) {
 	}
 	return c.Conn.Write(b)
 }
+
+// CloseWrite forwards a half-close to the underlying connection when it
+// supports one (e.g. *net.TCPConn, gonet.TCPConn). net.Conn does not expose
+// CloseWrite, so the embedded connection's method is not promoted automatically;
+// this makes graceful TCP half-close work through the wrapper. Returns nil when
+// the underlying connection has no write half to close.
+func (c *TimeoutConn) CloseWrite() error {
+	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return nil
+}

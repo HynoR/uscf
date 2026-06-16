@@ -1284,7 +1284,7 @@ func prepareSocksRuntime(tunNet *netstack.Net, connectionTimeout, idleTimeout ti
 				return dialFunc(ctx, network, addr)
 			}
 
-			return createSocksServer(username, password, resolver, dialWithTarget, verbose)
+			return createSocksServer(username, password, resolver, dialWithTarget, idleTimeout, verbose)
 		},
 	)
 	runtime.SetVerboseLogging(config.AppConfig.Logging.SocksVerbose)
@@ -1423,9 +1423,10 @@ func createSocksServer(
 	username, password string,
 	resolver api.NameResolver,
 	dialWithTarget targetDialFunc,
+	idleTimeout time.Duration,
 	verbose bool,
 ) socksServer {
-	return newTxthinkingAdapter(username, password, resolver, dialWithTarget, verbose)
+	return newTxthinkingAdapter(username, password, resolver, dialWithTarget, idleTimeout, verbose)
 }
 
 var errUDP443Blocked = errors.New("udp/443 blocked by config")
