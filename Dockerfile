@@ -50,6 +50,25 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
 
 ENTRYPOINT ["/app/entrypoint-wg-socks.sh"]
 
+FROM runtime-base AS runtime-wg-run
+
+# In-process (userspace) WireGuard run mode: gVisor netstack + wireguard-go
+# inside uscf, exposed as SOCKS5. No kernel WireGuard, so NONE of
+# wg-quick/iproute2/iptables/NET_ADMIN are needed — only outbound UDP and a
+# listening TCP port. ca-certificates is required for the HTTPS registration
+# call (`uscf wg register`).
+RUN apk add --no-cache ca-certificates
+
+COPY entrypoint-wg-run.sh /app/entrypoint-wg-run.sh
+COPY healthcheck.sh /app/healthcheck.sh
+
+RUN chmod +x /app/entrypoint-wg-run.sh /app/healthcheck.sh
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD /app/healthcheck.sh
+
+ENTRYPOINT ["/app/entrypoint-wg-run.sh"]
+
 FROM runtime-base AS runtime-regular
 
 COPY entrypoint.sh /app/entrypoint.sh
