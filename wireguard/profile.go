@@ -16,6 +16,7 @@ MTU = 1280
 PublicKey = {{ .PublicKey }}
 AllowedIPs = 0.0.0.0/0, ::/0
 Endpoint = {{ .Endpoint }}
+PersistentKeepalive = 25
 `
 
 type Profile struct {
