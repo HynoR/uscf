@@ -142,6 +142,30 @@ func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.
 		return nil, nil, nil, nil, errors.New("HTTP/3 mode requires a UDP endpoint")
 	}
 
+	// Cloudflare's edge occasionally aborts the very first connect-ip response
+	// read with a QUIC PROTOCOL_VIOLATION right after the handshake. Retry the
+	// HTTP/3 connect once before giving up. Ported from usque 21d9243.
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		udpConn, tr, ipConn, rsp, err := connectTunnelHTTP3(ctx, tlsConfig, quicConfig, template, additionalHeaders, udpEndpoint)
+		if err == nil {
+			return udpConn, tr, ipConn, rsp, nil
+		}
+		if strings.Contains(err.Error(), "tls: access denied") {
+			return nil, nil, nil, nil, errors.New("login failed! Please double-check if your tls key and cert is enrolled in the Cloudflare Access service")
+		}
+		lastErr = err
+		if !isRetryableHTTP3ConnectFailure(err) {
+			break
+		}
+	}
+	return nil, nil, nil, nil, fmt.Errorf("failed to dial connect-ip: %w", lastErr)
+}
+
+// connectTunnelHTTP3 performs a single QUIC+HTTP/3 connect-ip dial. It owns the
+// UDP socket it creates and closes it on every error path, so a failed attempt
+// never leaks a socket — the caller's cleanup only runs on the success path.
+func connectTunnelHTTP3(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.Config, template *uritemplate.Template, additionalHeaders http.Header, udpEndpoint *net.UDPAddr) (*net.UDPConn, *http3.Transport, *connectip.Conn, *http.Response, error) {
 	var udpConn *net.UDPConn
 	var err error
 	if udpEndpoint.IP.To4() == nil {
@@ -156,7 +180,7 @@ func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.
 		})
 	}
 	if err != nil {
-		return udpConn, nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
 	conn, err := quic.Dial(
@@ -167,7 +191,8 @@ func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.
 		quicConfig,
 	)
 	if err != nil {
-		return udpConn, nil, nil, nil, err
+		_ = udpConn.Close()
+		return nil, nil, nil, nil, err
 	}
 
 	tr := &http3.Transport{
@@ -188,13 +213,23 @@ func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.
 	if err != nil {
 		_ = tr.Close()
 		_ = conn.CloseWithError(0, "connect-ip dial failed")
-		if strings.Contains(err.Error(), "tls: access denied") {
-			return udpConn, nil, nil, nil, errors.New("login failed! Please double-check if your tls key and cert is enrolled in the Cloudflare Access service")
-		}
-		return udpConn, nil, nil, nil, fmt.Errorf("failed to dial connect-ip: %v", err)
+		_ = udpConn.Close()
+		return nil, nil, nil, nil, err
 	}
 
 	return udpConn, tr, ipConn, rsp, nil
+}
+
+// isRetryableHTTP3ConnectFailure reports whether a connect-ip dial failed with a
+// transient QUIC PROTOCOL_VIOLATION while reading the first response, which is
+// worth one immediate retry.
+func isRetryableHTTP3ConnectFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "failed to read response") &&
+		strings.Contains(msg, "PROTOCOL_VIOLATION")
 }
 
 func newHTTP2Client(baseTLSConfig *tls.Config, endpoint *net.TCPAddr, connectURI string) (*http.Client, tunnelTransport, error) {
