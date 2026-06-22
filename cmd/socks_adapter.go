@@ -56,17 +56,24 @@ type txthinkingAdapter struct {
 	udpSem chan struct{}
 }
 
-func newTxthinkingAdapter(username, password string, resolver api.NameResolver, dial targetDialFunc, idleTimeout time.Duration, verbose bool) *txthinkingAdapter {
+func newTxthinkingAdapter(username, password string, resolver api.NameResolver, dial targetDialFunc, idleTimeout time.Duration, verbose bool, tcpOnly bool) *txthinkingAdapter {
 	method := socks5.MethodNone
 	if username != "" && password != "" {
 		method = socks5.MethodUsernamePassword
+	}
+	// L4 mode tunnels each flow as an HTTP/3 CONNECT stream and has no UDP path,
+	// so advertise CONNECT only — GetRequest then rejects UDP ASSOCIATE during
+	// negotiation instead of accepting an association whose datagrams all drop.
+	supported := []byte{socks5.CmdConnect, socks5.CmdUDP}
+	if tcpOnly {
+		supported = []byte{socks5.CmdConnect}
 	}
 	return &txthinkingAdapter{
 		proto: &socks5.Server{
 			Method:            method,
 			UserName:          username,
 			Password:          password,
-			SupportedCommands: []byte{socks5.CmdConnect, socks5.CmdUDP},
+			SupportedCommands: supported,
 		},
 		resolver:    resolver,
 		dial:        dial,

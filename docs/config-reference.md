@@ -39,6 +39,7 @@ These fields only affect `uscf proxy`. WG mode runs `uscf socks`, so it logs and
 | `custom_endpoints_v4` / `custom_endpoints_v6` | Optional HTTP/3 MASQUE endpoint pools. If valid entries exist for the selected IP family, one is chosen randomly on reconnect. Not used by HTTP/2 mode. |
 | `socks.use_ipv6` | Use IPv6 endpoint and custom IPv6 endpoint pool for MASQUE connection. |
 | `socks.http2` | Use TCP+TLS+HTTP/2 for the MASQUE connection instead of QUIC+HTTP/3. CLI override: `uscf proxy --http2`. |
+| `socks.l4` | Use L4 mode: tunnel each TCP flow as an HTTP/3 CONNECT stream over one shared QUIC connection, bypassing the userspace netstack. Faster and lighter, but **TCP-only** (no UDP ASSOCIATE) and DNS is always resolved locally (`remote_dns` ignored). Mutually exclusive with `http2`. CLI override: `uscf proxy --l4`. |
 | `socks.connect_port` | MASQUE endpoint port. Used as UDP port in HTTP/3 mode and TCP port in HTTP/2 mode. |
 | `socks.dns` | DNS servers used by local or tunnel DNS resolver. |
 | `socks.dns_timeout` | Per-DNS-query timeout. |

@@ -90,6 +90,7 @@ func init() {
 	proxyCmd.Flags().StringP("password", "w", "", "Password for SOCKS5 proxy authentication (overrides config file)")
 	proxyCmd.Flags().Bool("use-ipv6", false, "Use IPv6 for MASQUE connection (overrides config file)")
 	proxyCmd.Flags().Bool("http2", false, "Use HTTP/2 over TCP+TLS instead of HTTP/3 over QUIC (overrides config file)")
+	proxyCmd.Flags().Bool("l4", false, "Use L4 mode: tunnel each TCP flow as an HTTP/3 CONNECT stream, bypassing the userspace netstack (faster, TCP-only)")
 
 	// 添加提示，说明SOCKS配置已移至配置文件，但可通过命令行参数覆盖
 	proxyCmd.Long += "\n\nNote: All SOCKS proxy settings are primarily managed through the config file, but can be overridden with command-line flags."
@@ -238,6 +239,13 @@ func applySocksFlagOverrides(cmd *cobra.Command, cfg *config.Config) (bool, []st
 		cfg.Socks.HTTP2 = useHTTP2
 		configChanged = true
 		overrides = append(overrides, "http2")
+	}
+
+	if cmd.Flags().Changed("l4") {
+		useL4, _ := cmd.Flags().GetBool("l4")
+		cfg.Socks.L4 = useL4
+		configChanged = true
+		overrides = append(overrides, "l4")
 	}
 
 	return configChanged, overrides
@@ -923,16 +931,17 @@ func newLocalDNSResolver() (api.NameResolver, error) {
 }
 
 type socksRuntimeMeta struct {
-	dnsMode        string
-	bypassDomains  int
-	proxyTCPPorts  int
-	blockUDP443    bool
+	dnsMode       string
+	bypassDomains int
+	proxyTCPPorts int
+	blockUDP443   bool
 }
 
 type proxyReadyInfo struct {
 	endpoint          net.Addr
 	endpointSelector  func() net.Addr
 	useHTTP2          bool
+	transport         string // explicit transport label (e.g. "l4"); empty derives from useHTTP2
 	connectionTimeout time.Duration
 	overrides         []string
 	configSaved       bool
@@ -942,6 +951,11 @@ type proxyReadyInfo struct {
 
 // setupAndRunSocksProxy 设置并运行SOCKS5代理
 func setupAndRunSocksProxy(cmd *cobra.Command, overrides []string, configSaved bool) error {
+	// L4 模式走独立链路：HTTP/3 CONNECT 流，绕过 TUN/netstack/connect-ip。
+	if config.AppConfig.Socks.L4 {
+		return setupAndRunL4Proxy(cmd, overrides, configSaved)
+	}
+
 	// 准备TLS配置
 	tlsConfig, err := prepareTlsConfig(cmd)
 	if err != nil {
@@ -1284,7 +1298,7 @@ func prepareSocksRuntime(tunNet *netstack.Net, connectionTimeout, idleTimeout ti
 				return dialFunc(ctx, network, addr)
 			}
 
-			return createSocksServer(username, password, resolver, dialWithTarget, idleTimeout, verbose)
+			return createSocksServer(username, password, resolver, dialWithTarget, idleTimeout, verbose, false)
 		},
 	)
 	runtime.SetVerboseLogging(config.AppConfig.Logging.SocksVerbose)
@@ -1297,6 +1311,15 @@ func proxyTransportLabel(useHTTP2 bool) string {
 		return "http2"
 	}
 	return "http3"
+}
+
+// resolvedTransportLabel prefers an explicit transport label (e.g. "l4") and
+// otherwise derives http2/http3 from the flag.
+func resolvedTransportLabel(info proxyReadyInfo) string {
+	if info.transport != "" {
+		return info.transport
+	}
+	return proxyTransportLabel(info.useHTTP2)
 }
 
 func selectedProxyEndpoint(endpoint net.Addr, selector func() net.Addr) string {
@@ -1322,7 +1345,7 @@ func logProxyReady(listenerAddr net.Addr, idleTimeout time.Duration, info proxyR
 	} else {
 		attrs = append(attrs,
 			"endpoint", selectedProxyEndpoint(info.endpoint, info.endpointSelector),
-			"transport", proxyTransportLabel(info.useHTTP2),
+			"transport", resolvedTransportLabel(info),
 			"dns", info.meta.dnsMode,
 			"tunnel", "up",
 		)
@@ -1425,8 +1448,9 @@ func createSocksServer(
 	dialWithTarget targetDialFunc,
 	idleTimeout time.Duration,
 	verbose bool,
+	tcpOnly bool,
 ) socksServer {
-	return newTxthinkingAdapter(username, password, resolver, dialWithTarget, idleTimeout, verbose)
+	return newTxthinkingAdapter(username, password, resolver, dialWithTarget, idleTimeout, verbose, tcpOnly)
 }
 
 var errUDP443Blocked = errors.New("udp/443 blocked by config")

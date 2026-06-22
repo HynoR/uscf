@@ -145,7 +145,7 @@ func TestUDPAllowSource(t *testing.T) {
 }
 
 func TestUDPSlotSemaphore(t *testing.T) {
-	a := newTxthinkingAdapter("", "", systemDNSResolver{}, stubDial, 0, false)
+	a := newTxthinkingAdapter("", "", systemDNSResolver{}, stubDial, 0, false, false)
 	a.udpSem = make(chan struct{}, 2)
 
 	if !a.acquireUDPSlot() || !a.acquireUDPSlot() {
@@ -161,7 +161,7 @@ func TestUDPSlotSemaphore(t *testing.T) {
 }
 
 func TestCountedConnReleasesOnce(t *testing.T) {
-	a := newTxthinkingAdapter("", "", systemDNSResolver{}, stubDial, 0, false)
+	a := newTxthinkingAdapter("", "", systemDNSResolver{}, stubDial, 0, false, false)
 	a.udpSem = make(chan struct{}, 1)
 
 	if !a.acquireUDPSlot() {

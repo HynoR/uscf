@@ -4,6 +4,10 @@ const (
 	ApiUrl     = "https://api.cloudflareclient.com"
 	ApiVersion = "v0a4471"
 	ConnectSNI = "consumer-masque.cloudflareclient.com"
+	// L4ConnectSNI is the SNI for Cloudflare's MASQUE *proxy* endpoint used by L4
+	// (HTTP/3 CONNECT-stream) mode. It is a different service from ConnectSNI
+	// (the connect-ip/L3 tunnel) but reuses the same endpoint IPs and enrollment.
+	L4ConnectSNI = "consumer-masque-proxy.cloudflareclient.com"
 	// unused for now
 	ZeroTierSNI   = "zt-masque.cloudflareclient.com"
 	ConnectURI    = "https://cloudflareaccess.com"
