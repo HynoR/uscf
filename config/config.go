@@ -129,7 +129,7 @@ type SocksConfig struct {
 	UseIPv6              bool     `json:"use_ipv6"`               // 是否使用IPv6进行MASQUE连接
 	HTTP2                bool     `json:"http2"`                  // true=TCP+TLS+HTTP/2; false=QUIC+HTTP/3
 	L4                   bool     `json:"l4"`                     // true=L4模式(HTTP/3 CONNECT流, 绕过netstack, 仅TCP); 与http2互斥
-	L4UDP                string   `json:"l4_udp"`                 // L4模式下UDP处理: "block"(默认,拒绝UDP ASSOCIATE) | "direct"(本地直连,绕过隧道,UDP以真实出口IP外发)
+	L4UDP                string   `json:"l4_udp"`                 // L4模式下UDP处理: "block"(默认,拒绝UDP ASSOCIATE) | "direct"(本地直连,绕过隧道,UDP以真实出口IP外发) | "tunnel"(mix模式,UDP走并行L3 connect-ip隧道,真实WARP IP出口)
 	NoTunnelIPv4         bool     `json:"no_tunnel_ipv4"`         // 是否在MASQUE隧道内禁用IPv4
 	NoTunnelIPv6         bool     `json:"no_tunnel_ipv6"`         // 是否在MASQUE隧道内禁用IPv6
 	BlockUDP443          bool     `json:"block_udp_443"`          // Whether to block outbound UDP/443 (QUIC)
@@ -146,8 +146,9 @@ type SocksConfig struct {
 }
 
 // L4 UDP handling modes (socks.l4_udp). The L4 transport has no UDP path of its
-// own — Cloudflare's MASQUE proxy endpoint answers connect-udp with 403 — so the
-// only choices are to refuse UDP or to relay it outside the tunnel.
+// own — Cloudflare's MASQUE proxy endpoint answers connect-udp with 403 — so UDP
+// is either refused, relayed outside the tunnel, or carried over a parallel L3
+// connect-ip tunnel ("mix" mode).
 const (
 	// L4UDPBlock rejects SOCKS UDP ASSOCIATE outright (the default). Apps that can
 	// fall back to TCP (e.g. browsers downgrading QUIC to HTTP/2) keep working.
@@ -155,6 +156,13 @@ const (
 	// L4UDPDirect accepts UDP ASSOCIATE but relays datagrams through a direct local
 	// socket, bypassing WARP. UDP egresses the host's real IP; only TCP is tunneled.
 	L4UDPDirect = "direct"
+	// L4UDPTunnel ("mix" mode) accepts UDP ASSOCIATE and relays datagrams through a
+	// parallel connect-ip (L3/netstack) tunnel that runs alongside the L4 TCP proxy,
+	// so UDP egresses the real WARP IP while TCP keeps L4's per-flow QUIC speed. The
+	// L3 leg is lazy (built on the first UDP datagram, sleeps when idle) because mix
+	// mode targets workloads that are almost entirely TCP. block_udp_443 still applies
+	// (QUIC-in-QUIC over the tunnel would throttle bandwidth — apps fall back to TCP).
+	L4UDPTunnel = "tunnel"
 )
 
 // SSHSocksConfig 包含SSH SOCKS5网关相关的配置
@@ -462,8 +470,10 @@ func NormalizeSocksConfig(cfg SocksConfig) (SocksConfig, error) {
 		normalized.L4UDP = L4UDPBlock
 	case L4UDPDirect:
 		normalized.L4UDP = L4UDPDirect
+	case L4UDPTunnel:
+		normalized.L4UDP = L4UDPTunnel
 	default:
-		return SocksConfig{}, fmt.Errorf("invalid l4_udp %q: must be %q or %q", cfg.L4UDP, L4UDPBlock, L4UDPDirect)
+		return SocksConfig{}, fmt.Errorf("invalid l4_udp %q: must be %q, %q or %q", cfg.L4UDP, L4UDPBlock, L4UDPDirect, L4UDPTunnel)
 	}
 	return normalized, nil
 }

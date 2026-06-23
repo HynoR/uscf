@@ -22,21 +22,26 @@ var errL4UDPUnsupported = errors.New("L4 mode is TCP-only; UDP is not supported"
 
 // l4UDPRoute classifies how a UDP dial is handled in L4 mode. The L4 transport
 // cannot tunnel UDP (Cloudflare's MASQUE proxy endpoint answers connect-udp with
-// 403), so the only outcomes are "refuse" or "send it out directly".
+// 403), so UDP is either refused, sent out directly, or carried over a parallel
+// L3 connect-ip tunnel ("mix" mode).
 type l4UDPRoute int
 
 const (
 	l4UDPReject     l4UDPRoute = iota // refuse the datagram (block mode)
 	l4UDPBlocked443                   // refuse: block_udp_443 is on and dst port is 443
 	l4UDPDirectOut                    // relay directly, bypassing the tunnel (direct mode)
+	l4UDPTunnelOut                    // relay over the parallel L3 connect-ip tunnel (tunnel/mix mode)
 )
 
-// classifyL4UDP decides the disposition of an L4-mode UDP dial. In "block" mode
-// (directMode=false) UDP is always refused. In "direct" mode it is relayed
-// straight out, except that block_udp_443 still suppresses UDP/443 (QUIC) so apps
-// fall back to the tunneled TCP path instead of leaking QUIC outside WARP.
-func classifyL4UDP(directMode bool, blockUDP443 bool, addr string) l4UDPRoute {
-	if !directMode {
+// classifyL4UDP decides the disposition of an L4-mode UDP dial given socks.l4_udp.
+// "block" always refuses. "direct" relays straight out; "tunnel" relays over the
+// parallel L3 connect-ip leg. Both "direct" and "tunnel" honor block_udp_443,
+// which suppresses UDP/443 (QUIC) so apps fall back to the tunneled TCP path: in
+// direct mode that stops QUIC leaking outside WARP, and in tunnel mode it stops
+// QUIC-in-QUIC over the L3 leg from throttling bandwidth. block_udp_443 is a
+// precondition for forcing HTTP/3 down to HTTP/2, not an optional optimization.
+func classifyL4UDP(mode string, blockUDP443 bool, addr string) l4UDPRoute {
+	if mode != config.L4UDPDirect && mode != config.L4UDPTunnel {
 		return l4UDPReject
 	}
 	if blockUDP443 {
@@ -44,7 +49,31 @@ func classifyL4UDP(directMode bool, blockUDP443 bool, addr string) l4UDPRoute {
 			return l4UDPBlocked443
 		}
 	}
+	if mode == config.L4UDPTunnel {
+		return l4UDPTunnelOut
+	}
 	return l4UDPDirectOut
+}
+
+// dialL4UDP routes a UDP dial in L4 mode according to socks.l4_udp. "direct"
+// relays straight out via directDial; "tunnel" carries it over the parallel L3
+// connect-ip leg (udpTunnel); a block_udp_443 hit or a non-UDP-capable mode
+// returns the matching error so the SOCKS layer drops the datagram. Extracted
+// from the dialWithTarget closure so the route→dialer mapping is unit-testable
+// without a live tunnel.
+func dialL4UDP(ctx context.Context, network, addr string, target socksTarget, mode string, blockUDP443 bool, directDial socksDialFunc, udpTunnel *l3UDPTunnel) (net.Conn, error) {
+	switch classifyL4UDP(mode, blockUDP443, addr) {
+	case l4UDPDirectOut:
+		slog.Debug("l4 udp relayed directly (bypassing tunnel)", "host", target.Host, "port", target.Port, "target", addr)
+		return directDial(ctx, network, addr)
+	case l4UDPTunnelOut:
+		slog.Debug("l4 udp routed over parallel L3 tunnel", "host", target.Host, "port", target.Port, "target", addr)
+		return udpTunnel.DialUDP(ctx, addr)
+	case l4UDPBlocked443:
+		return nil, errUDP443Blocked
+	default:
+		return nil, errL4UDPUnsupported
+	}
 }
 
 // setupAndRunL4Proxy runs the SOCKS5 proxy over the L4 (HTTP/3 CONNECT-stream)
@@ -84,7 +113,21 @@ func setupAndRunL4Proxy(cmd *cobra.Command, overrides []string, configSaved bool
 	}
 	defer l4Proxy.Close()
 
-	socksRuntime, runtimeMeta, err := prepareL4SocksRuntime(l4Proxy, connectionTimeout, idleTimeout)
+	// "mix" mode: stand up a parallel, lazy L3 connect-ip tunnel that carries UDP
+	// while TCP rides L4. It does not connect until the first UDP datagram, so a
+	// mostly-TCP workload pays nothing for it. The TCP path is untouched.
+	var udpTunnel *l3UDPTunnel
+	if config.AppConfig.Socks.L4UDP == config.L4UDPTunnel {
+		slog.Warn("l4_udp=tunnel (experimental mix mode): TCP egresses via L4, UDP via a parallel L3 connect-ip tunnel (real WARP IP); the UDP leg is lazy and stays dormant when idle")
+		tunnel, cleanup, terr := startL3UDPTunnel(cmd, connectionTimeout, idleTimeout)
+		if terr != nil {
+			return fmt.Errorf("failed to start L3 UDP tunnel for mix mode: %w", terr)
+		}
+		defer cleanup()
+		udpTunnel = tunnel
+	}
+
+	socksRuntime, runtimeMeta, err := prepareL4SocksRuntime(l4Proxy, udpTunnel, connectionTimeout, idleTimeout)
 	if err != nil {
 		return err
 	}
@@ -182,7 +225,7 @@ func l4QUICConfig(keepalivePeriod time.Duration, initialPacketSize uint16) *quic
 // the SOCKS server is CONNECT-only (TCP), and the upstream dialer routes through
 // the L4 QUIC connection while bypass/proxy-port rules still fall back to a
 // direct dial.
-func prepareL4SocksRuntime(l4Proxy *api.L4Proxy, connectionTimeout, idleTimeout time.Duration) (*socksRuntime, socksRuntimeMeta, error) {
+func prepareL4SocksRuntime(l4Proxy *api.L4Proxy, udpTunnel *l3UDPTunnel, connectionTimeout, idleTimeout time.Duration) (*socksRuntime, socksRuntimeMeta, error) {
 	routePolicy, err := newRoutePolicy(config.AppConfig.Socks.BypassDomain, config.AppConfig.Socks.ProxyTCPPort)
 	if err != nil {
 		return nil, socksRuntimeMeta{}, err
@@ -200,12 +243,20 @@ func prepareL4SocksRuntime(l4Proxy *api.L4Proxy, connectionTimeout, idleTimeout 
 	}
 
 	// L4 cannot tunnel UDP. "direct" relays UDP ASSOCIATE straight out (bypassing
-	// WARP); "block" (default) refuses it so apps fall back to TCP.
-	directUDP := config.AppConfig.Socks.L4UDP == config.L4UDPDirect
-	meta.udpMode = config.AppConfig.Socks.L4UDP
-	if directUDP {
+	// WARP); "tunnel" relays it over the parallel L3 connect-ip leg; "block"
+	// (default) refuses it so apps fall back to TCP.
+	udpMode := config.AppConfig.Socks.L4UDP
+	udpEnabled := udpMode == config.L4UDPDirect || udpMode == config.L4UDPTunnel
+	meta.udpMode = udpMode
+	if udpEnabled {
+		// block_udp_443 applies to both direct and tunnel UDP egress; surface it.
 		meta.blockUDP443 = config.AppConfig.Socks.BlockUDP443
+	}
+	if udpMode == config.L4UDPDirect {
 		slog.Warn("l4_udp=direct: SOCKS UDP ASSOCIATE is relayed directly, bypassing WARP — UDP egresses your real IP (only TCP is tunneled)")
+	}
+	if udpMode == config.L4UDPTunnel && udpTunnel == nil {
+		return nil, socksRuntimeMeta{}, fmt.Errorf("l4_udp=tunnel requires an L3 UDP tunnel, but none was provided")
 	}
 
 	// L4 has no in-tunnel DNS path (no netstack), so resolution is always local.
@@ -262,15 +313,7 @@ func prepareL4SocksRuntime(l4Proxy *api.L4Proxy, connectionTimeout, idleTimeout 
 		func(dialFunc socksDialFunc) socksServer {
 			dialWithTarget := func(ctx context.Context, network, addr string, target socksTarget) (net.Conn, error) {
 				if strings.HasPrefix(network, "udp") {
-					switch classifyL4UDP(directUDP, config.AppConfig.Socks.BlockUDP443, addr) {
-					case l4UDPDirectOut:
-						slog.Debug("l4 udp relayed directly (bypassing tunnel)", "host", target.Host, "port", target.Port, "target", addr)
-						return directDial(ctx, network, addr)
-					case l4UDPBlocked443:
-						return nil, errUDP443Blocked
-					default:
-						return nil, errL4UDPUnsupported
-					}
+					return dialL4UDP(ctx, network, addr, target, udpMode, config.AppConfig.Socks.BlockUDP443, directDial, udpTunnel)
 				}
 				if !selectTCPRoute(routePolicy, network, target) {
 					slog.Debug("route policy selected direct network", "network", network, "host", target.Host, "port", target.Port, "target", addr)
@@ -278,9 +321,9 @@ func prepareL4SocksRuntime(l4Proxy *api.L4Proxy, connectionTimeout, idleTimeout 
 				}
 				return dialFunc(ctx, network, addr)
 			}
-			// tcpOnly gates UDP ASSOCIATE at SOCKS negotiation: only "direct" mode
-			// advertises (and then directly relays) UDP; "block" stays CONNECT-only.
-			return createSocksServer(username, password, resolver, dialWithTarget, idleTimeout, verbose, !directUDP)
+			// tcpOnly gates UDP ASSOCIATE at SOCKS negotiation: "direct" and "tunnel"
+			// advertise (and then relay) UDP; "block" stays CONNECT-only.
+			return createSocksServer(username, password, resolver, dialWithTarget, idleTimeout, verbose, !udpEnabled)
 		},
 	)
 	runtime.SetVerboseLogging(verbose)

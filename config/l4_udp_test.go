@@ -14,6 +14,9 @@ func TestNormalizeSocksConfigL4UDP(t *testing.T) {
 		{"direct", L4UDPDirect},
 		{"DIRECT", L4UDPDirect},
 		{"  Direct  ", L4UDPDirect},
+		{"tunnel", L4UDPTunnel},
+		{"TUNNEL", L4UDPTunnel},
+		{"  Tunnel  ", L4UDPTunnel},
 	}
 	for _, tc := range valid {
 		cfg := base
@@ -28,9 +31,9 @@ func TestNormalizeSocksConfigL4UDP(t *testing.T) {
 	}
 
 	cfg := base
-	cfg.L4UDP = "tunnel"
+	cfg.L4UDP = "garbage"
 	if _, err := NormalizeSocksConfig(cfg); err == nil {
-		t.Fatal("NormalizeSocksConfig(l4_udp=\"tunnel\"): expected error, got nil")
+		t.Fatal("NormalizeSocksConfig(l4_udp=\"garbage\"): expected error, got nil")
 	}
 }
 

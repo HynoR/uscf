@@ -103,7 +103,7 @@ func TestL4DirectUDPLive(t *testing.T) {
 	}
 	defer l4Proxy.Close()
 
-	runtime, _, err := prepareL4SocksRuntime(l4Proxy, 10*time.Second, 30*time.Second)
+	runtime, _, err := prepareL4SocksRuntime(l4Proxy, nil, 10*time.Second, 30*time.Second)
 	if err != nil {
 		t.Fatalf("prepare runtime: %v", err)
 	}
