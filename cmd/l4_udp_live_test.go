@@ -17,6 +17,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
+	"log/slog"
 	"net"
 	"os"
 	"testing"
@@ -74,6 +75,12 @@ func TestL4DirectUDPLive(t *testing.T) {
 	config.AppConfig.EndpointV4 = host
 	config.AppConfig.EndpointPubKey = peer.PublicKey
 	config.AppConfig.Socks = socks
+
+	// Enable verbose + debug logging so the UDP proxying lines are visible: this
+	// exercises the success-logging path (ASSOCIATE established / flow established
+	// / reply received).
+	config.AppConfig.Logging.SocksVerbose = true
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
 
 	// 3. Build the real L4 runtime in-process (same code paths the command uses).
 	tlsConfig, err := prepareL4TlsConfig()

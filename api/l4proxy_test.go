@@ -231,3 +231,16 @@ func TestL4ProxyCloseIsSafe(t *testing.T) {
 		t.Fatalf("second Close: %v", err)
 	}
 }
+
+func TestL4ProxyConnHealthHelpersNilSafe(t *testing.T) {
+	p := &L4Proxy{}
+	// Both helpers must tolerate nil clients / nil QUIC connections without
+	// panicking (they run on dial error paths and as a goroutine).
+	p.dropConnIfDead(nil)
+	p.dropConnIfDead(&l4HTTP3Client{})
+	p.watchClientConn(nil)
+	p.watchClientConn(&l4HTTP3Client{}) // nil quicConn returns immediately
+	if p.client != nil {
+		t.Fatal("nil-safe helpers must not set a client")
+	}
+}

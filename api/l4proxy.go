@@ -186,14 +186,18 @@ func (p *L4Proxy) dial(ctx context.Context, target string) (*l4TCPConn, error) {
 	req.Host = target
 	if err := stream.SendRequestHeader(req); err != nil {
 		closeL4Stream(stream)
+		p.dropConnIfDead(h3Client)
 		return nil, err
 	}
 	response, err := stream.ReadResponse()
 	if err != nil {
 		closeL4Stream(stream)
+		p.dropConnIfDead(h3Client)
 		return nil, err
 	}
 	if response.StatusCode < 200 || response.StatusCode > 299 {
+		// A valid non-2xx response means the shared connection is healthy and only
+		// this target was rejected: close just the stream, never the connection.
 		closeL4Stream(stream)
 		return nil, fmt.Errorf("CONNECT %s rejected with status %d", target, response.StatusCode)
 	}
@@ -264,8 +268,41 @@ func (p *L4Proxy) getOrCreateClientConn(ctx context.Context) (*l4HTTP3Client, er
 	p.client = newClient
 	p.connMu.Unlock()
 	slog.Debug("l4 proxy established shared QUIC connection", "endpoint", endpoint.String())
+	go p.watchClientConn(newClient)
 
 	return newClient, nil
+}
+
+// watchClientConn evicts the cached shared connection from the cache as soon as
+// its underlying QUIC connection dies — idle eviction by Cloudflare, a server
+// close, or a path/keepalive failure detected by quic-go. Without this, a dead
+// connection lingers in the cache: OpenRequestStream still succeeds locally, so
+// the reconnect-on-open-error path never triggers, and every new dial blocks in
+// ReadResponse until its timeout. Proactively dropping the dead connection lets
+// the next dial rebuild immediately instead of stalling all flows. The goroutine
+// exits when the connection is closed (Done fires) — including on Close() — so it
+// does not leak.
+func (p *L4Proxy) watchClientConn(client *l4HTTP3Client) {
+	if client == nil || client.quicConn == nil {
+		return
+	}
+	<-client.quicConn.Context().Done()
+	slog.Debug("l4 proxy shared QUIC connection closed; invalidating cache",
+		"cause", context.Cause(client.quicConn.Context()))
+	p.closeClientConnIfCurrent(client)
+}
+
+// dropConnIfDead invalidates the cached shared connection when its underlying
+// QUIC connection has already died. Called on dial-time transport errors
+// (SendRequestHeader / ReadResponse) so that the first dial to observe a path
+// failure frees every other in-flight and subsequent dial to rebuild, instead of
+// each one independently blocking on the same dead connection. A per-target
+// rejection (a valid non-2xx HTTP response) never reaches here, so a single bad
+// target never tears down the connection shared by all other live flows.
+func (p *L4Proxy) dropConnIfDead(client *l4HTTP3Client) {
+	if client != nil && client.quicConn != nil && client.quicConn.Context().Err() != nil {
+		p.closeClientConnIfCurrent(client)
+	}
 }
 
 // closeClientConnIfCurrent drops the shared connection only if it is still the

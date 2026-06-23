@@ -271,6 +271,9 @@ func (a *txthinkingAdapter) handleAssociate(conn net.Conn, req *socks5.Request) 
 	if _, err := socks5.NewReply(socks5.RepSuccess, atyp, addr, port).WriteTo(conn); err != nil {
 		return err
 	}
+	if a.verbose {
+		slog.Debug("UDP ASSOCIATE established", "client", conn.RemoteAddr(), "relay", relay.LocalAddr())
+	}
 
 	assoc := &udpAssociation{
 		adapter:     a,
@@ -428,6 +431,9 @@ func (assoc *udpAssociation) forwardFromClient(clientAddr *net.UDPAddr, d *socks
 	ctx := context.Background()
 	dialAddr, err := assoc.adapter.resolveDialAddr(ctx, target)
 	if err != nil {
+		if assoc.adapter.verbose {
+			slog.Warn("dropping UDP datagram: resolve failed", "dst", dst, "error", err)
+		}
 		return
 	}
 
@@ -441,7 +447,14 @@ func (assoc *udpAssociation) forwardFromClient(clientAddr *net.UDPAddr, d *socks
 	}
 	rawUp, err := assoc.adapter.dial(ctx, "udp", dialAddr, target)
 	if err != nil {
-		// e.g. block_udp_443 or tunnel down: silently drop, the client retries.
+		// e.g. block_udp_443, tunnel down, or an L4 direct/tunnel dial error: the
+		// datagram is dropped and the client retries. Log it (verbose) so a UDP
+		// outage is diagnosable instead of silent — the underlying reason
+		// (tunnel-down, udp/443 blocked, dial error) is only otherwise visible at
+		// the L3 runtime layer, and not at all for L4 direct/tunnel modes.
+		if assoc.adapter.verbose {
+			slog.Warn("dropping UDP datagram: upstream dial failed", "dst", dst, "target", dialAddr, "error", err)
+		}
 		assoc.adapter.releaseUDPSlot()
 		return
 	}
@@ -468,6 +481,11 @@ func (assoc *udpAssociation) forwardFromClient(clientAddr *net.UDPAddr, d *socks
 		assoc.removeUpstream(dst, up)
 		return
 	}
+	// Per-flow success line (verbose): confirms UDP is actually being proxied to a
+	// destination — one line per new (association, dst), not per datagram.
+	if assoc.adapter.verbose {
+		slog.Debug("UDP proxying flow established", "src", clientAddr, "dst", dst, "first_bytes", len(d.Data))
+	}
 	go assoc.relayFromUpstream(dst, up)
 }
 
@@ -486,6 +504,7 @@ func (assoc *udpAssociation) relayFromUpstream(dst string, up net.Conn) {
 	}
 
 	buf := make([]byte, 65535)
+	firstReply := true
 	for {
 		n, err := up.Read(buf)
 		if err != nil {
@@ -494,6 +513,12 @@ func (assoc *udpAssociation) relayFromUpstream(dst string, up net.Conn) {
 		clientAddr := assoc.clientAddr.Load()
 		if clientAddr == nil {
 			continue
+		}
+		// One line on the first reply (verbose): confirms the upstream actually
+		// answered, i.e. UDP is being proxied bidirectionally — not per datagram.
+		if firstReply && assoc.adapter.verbose {
+			slog.Debug("UDP proxying reply received", "dst", dst, "client", clientAddr, "bytes", n)
+			firstReply = false
 		}
 		assoc.touch()
 		datagram := socks5.NewDatagram(atyp, addr, port, buf[:n])
