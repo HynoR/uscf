@@ -37,3 +37,6 @@ config.json
 !examples/**/config.json
 .gocache/
 bin/
+
+# local-only docs (not for upload)
+docs/local/
