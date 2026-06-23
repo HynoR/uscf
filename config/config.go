@@ -127,6 +127,7 @@ type SocksConfig struct {
 	UseIPv6              bool     `json:"use_ipv6"`               // 是否使用IPv6进行MASQUE连接
 	HTTP2                bool     `json:"http2"`                  // true=TCP+TLS+HTTP/2; false=QUIC+HTTP/3
 	L4                   bool     `json:"l4"`                     // true=L4模式(HTTP/3 CONNECT流, 绕过netstack, 仅TCP); 与http2互斥
+	L4UDP                string   `json:"l4_udp"`                 // L4模式下UDP处理: "block"(默认,拒绝UDP ASSOCIATE) | "direct"(本地直连,绕过隧道,UDP以真实出口IP外发)
 	NoTunnelIPv4         bool     `json:"no_tunnel_ipv4"`         // 是否在MASQUE隧道内禁用IPv4
 	NoTunnelIPv6         bool     `json:"no_tunnel_ipv6"`         // 是否在MASQUE隧道内禁用IPv6
 	BlockUDP443          bool     `json:"block_udp_443"`          // Whether to block outbound UDP/443 (QUIC)
@@ -141,6 +142,18 @@ type SocksConfig struct {
 	IdleTimeout          Duration `json:"idle_timeout"`           // 空闲连接的超时时间
 	AlwaysReconnect      bool     `json:"always_reconnect"`       // true=断线后立即重连；false(默认)=隧道空闲被服务端清掉后，等到有出站流量再重连
 }
+
+// L4 UDP handling modes (socks.l4_udp). The L4 transport has no UDP path of its
+// own — Cloudflare's MASQUE proxy endpoint answers connect-udp with 403 — so the
+// only choices are to refuse UDP or to relay it outside the tunnel.
+const (
+	// L4UDPBlock rejects SOCKS UDP ASSOCIATE outright (the default). Apps that can
+	// fall back to TCP (e.g. browsers downgrading QUIC to HTTP/2) keep working.
+	L4UDPBlock = "block"
+	// L4UDPDirect accepts UDP ASSOCIATE but relays datagrams through a direct local
+	// socket, bypassing WARP. UDP egresses the host's real IP; only TCP is tunneled.
+	L4UDPDirect = "direct"
+)
 
 // SSHSocksConfig 包含SSH SOCKS5网关相关的配置
 type SSHSocksConfig struct {
@@ -356,6 +369,7 @@ func GetDefaultSocksConfig() SocksConfig {
 		BlockUDP443:     true,
 		HTTP2:           false,
 		L4:              false,
+		L4UDP:           L4UDPBlock,
 		SNIAddress:      "", // 这应当从internal.ConnectSNI读取，但现在我们不修改其他文件
 		KeepalivePeriod: Duration(30 * time.Second),
 		// MTU is the inner (tunneled) packet size. 1280 is the safe default;
@@ -454,6 +468,14 @@ func NormalizeSocksConfig(cfg SocksConfig) (SocksConfig, error) {
 	}
 	if normalized.DrainGrace.Duration() <= 0 {
 		normalized.DrainGrace = GetDefaultSocksConfig().DrainGrace
+	}
+	switch strings.ToLower(strings.TrimSpace(normalized.L4UDP)) {
+	case "", L4UDPBlock:
+		normalized.L4UDP = L4UDPBlock
+	case L4UDPDirect:
+		normalized.L4UDP = L4UDPDirect
+	default:
+		return SocksConfig{}, fmt.Errorf("invalid l4_udp %q: must be %q or %q", cfg.L4UDP, L4UDPBlock, L4UDPDirect)
 	}
 	return normalized, nil
 }

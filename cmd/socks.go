@@ -164,6 +164,7 @@ func ignoredSocksOnlySettings(cfg config.Config) []string {
 	add(cfg.Socks.UseIPv6, "use_ipv6")
 	add(cfg.Socks.HTTP2, "http2")
 	add(cfg.Socks.L4, "l4")
+	add(strings.TrimSpace(cfg.Socks.L4UDP) != "" && cfg.Socks.L4UDP != defaults.L4UDP, "l4_udp")
 	add(cfg.Socks.NoTunnelIPv4, "no_tunnel_ipv4")
 	add(cfg.Socks.NoTunnelIPv6, "no_tunnel_ipv6")
 	add(strings.TrimSpace(cfg.Socks.SNIAddress) != "", "sni_address")

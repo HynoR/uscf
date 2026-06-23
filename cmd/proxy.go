@@ -91,6 +91,7 @@ func init() {
 	proxyCmd.Flags().Bool("use-ipv6", false, "Use IPv6 for MASQUE connection (overrides config file)")
 	proxyCmd.Flags().Bool("http2", false, "Use HTTP/2 over TCP+TLS instead of HTTP/3 over QUIC (overrides config file)")
 	proxyCmd.Flags().Bool("l4", false, "Use L4 mode: tunnel each TCP flow as an HTTP/3 CONNECT stream, bypassing the userspace netstack (faster, TCP-only)")
+	proxyCmd.Flags().String("l4-udp", "", "L4 UDP handling: \"block\" (reject UDP ASSOCIATE) or \"direct\" (relay UDP directly, bypassing WARP)")
 
 	// 添加提示，说明SOCKS配置已移至配置文件，但可通过命令行参数覆盖
 	proxyCmd.Long += "\n\nNote: All SOCKS proxy settings are primarily managed through the config file, but can be overridden with command-line flags."
@@ -246,6 +247,18 @@ func applySocksFlagOverrides(cmd *cobra.Command, cfg *config.Config) (bool, []st
 		cfg.Socks.L4 = useL4
 		configChanged = true
 		overrides = append(overrides, "l4")
+	}
+
+	if cmd.Flags().Changed("l4-udp") {
+		raw, _ := cmd.Flags().GetString("l4-udp")
+		switch strings.ToLower(strings.TrimSpace(raw)) {
+		case config.L4UDPBlock, config.L4UDPDirect:
+			cfg.Socks.L4UDP = strings.ToLower(strings.TrimSpace(raw))
+			configChanged = true
+			overrides = append(overrides, "l4_udp")
+		default:
+			slog.Warn("ignoring invalid --l4-udp value; expected \"block\" or \"direct\"", "value", raw)
+		}
 	}
 
 	return configChanged, overrides
@@ -935,6 +948,7 @@ type socksRuntimeMeta struct {
 	bypassDomains int
 	proxyTCPPorts int
 	blockUDP443   bool
+	udpMode       string // L4 UDP disposition ("block"/"direct"); empty outside L4
 }
 
 type proxyReadyInfo struct {
@@ -1352,6 +1366,9 @@ func logProxyReady(listenerAddr net.Addr, idleTimeout time.Duration, info proxyR
 	}
 	if info.meta.blockUDP443 {
 		attrs = append(attrs, "block_udp_443", true)
+	}
+	if info.meta.udpMode != "" {
+		attrs = append(attrs, "l4_udp", info.meta.udpMode)
 	}
 	if info.meta.bypassDomains > 0 {
 		attrs = append(attrs, "bypass_domains", info.meta.bypassDomains)

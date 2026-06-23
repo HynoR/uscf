@@ -20,6 +20,33 @@ import (
 
 var errL4UDPUnsupported = errors.New("L4 mode is TCP-only; UDP is not supported")
 
+// l4UDPRoute classifies how a UDP dial is handled in L4 mode. The L4 transport
+// cannot tunnel UDP (Cloudflare's MASQUE proxy endpoint answers connect-udp with
+// 403), so the only outcomes are "refuse" or "send it out directly".
+type l4UDPRoute int
+
+const (
+	l4UDPReject     l4UDPRoute = iota // refuse the datagram (block mode)
+	l4UDPBlocked443                   // refuse: block_udp_443 is on and dst port is 443
+	l4UDPDirectOut                    // relay directly, bypassing the tunnel (direct mode)
+)
+
+// classifyL4UDP decides the disposition of an L4-mode UDP dial. In "block" mode
+// (directMode=false) UDP is always refused. In "direct" mode it is relayed
+// straight out, except that block_udp_443 still suppresses UDP/443 (QUIC) so apps
+// fall back to the tunneled TCP path instead of leaking QUIC outside WARP.
+func classifyL4UDP(directMode bool, blockUDP443 bool, addr string) l4UDPRoute {
+	if !directMode {
+		return l4UDPReject
+	}
+	if blockUDP443 {
+		if _, port, err := net.SplitHostPort(addr); err == nil && port == "443" {
+			return l4UDPBlocked443
+		}
+	}
+	return l4UDPDirectOut
+}
+
 // setupAndRunL4Proxy runs the SOCKS5 proxy over the L4 (HTTP/3 CONNECT-stream)
 // transport. It reuses uscf's SOCKS machinery — auth, route policy, idle
 // timeouts, the caching resolver, verbose logging, connection tracking — but
@@ -172,6 +199,15 @@ func prepareL4SocksRuntime(l4Proxy *api.L4Proxy, connectionTimeout, idleTimeout 
 		slog.Warn("remote_dns is ignored in L4 mode; resolving names locally")
 	}
 
+	// L4 cannot tunnel UDP. "direct" relays UDP ASSOCIATE straight out (bypassing
+	// WARP); "block" (default) refuses it so apps fall back to TCP.
+	directUDP := config.AppConfig.Socks.L4UDP == config.L4UDPDirect
+	meta.udpMode = config.AppConfig.Socks.L4UDP
+	if directUDP {
+		meta.blockUDP443 = config.AppConfig.Socks.BlockUDP443
+		slog.Warn("l4_udp=direct: SOCKS UDP ASSOCIATE is relayed directly, bypassing WARP — UDP egresses your real IP (only TCP is tunneled)")
+	}
+
 	// L4 has no in-tunnel DNS path (no netstack), so resolution is always local.
 	// The CONNECT authority must be an IP literal, which the SOCKS adapter
 	// produces by resolving here before dialing.
@@ -183,6 +219,8 @@ func prepareL4SocksRuntime(l4Proxy *api.L4Proxy, connectionTimeout, idleTimeout 
 	meta.dnsMode = "local"
 
 	upstreamDial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		// UDP never goes through the L4 QUIC connection; direct mode routes it via
+		// directDial in dialWithTarget below, so reaching here with UDP is a bug.
 		if !strings.HasPrefix(network, "tcp") {
 			return nil, errL4UDPUnsupported
 		}
@@ -223,14 +261,26 @@ func prepareL4SocksRuntime(l4Proxy *api.L4Proxy, connectionTimeout, idleTimeout 
 		upstreamDial,
 		func(dialFunc socksDialFunc) socksServer {
 			dialWithTarget := func(ctx context.Context, network, addr string, target socksTarget) (net.Conn, error) {
+				if strings.HasPrefix(network, "udp") {
+					switch classifyL4UDP(directUDP, config.AppConfig.Socks.BlockUDP443, addr) {
+					case l4UDPDirectOut:
+						slog.Debug("l4 udp relayed directly (bypassing tunnel)", "host", target.Host, "port", target.Port, "target", addr)
+						return directDial(ctx, network, addr)
+					case l4UDPBlocked443:
+						return nil, errUDP443Blocked
+					default:
+						return nil, errL4UDPUnsupported
+					}
+				}
 				if !selectTCPRoute(routePolicy, network, target) {
 					slog.Debug("route policy selected direct network", "network", network, "host", target.Host, "port", target.Port, "target", addr)
 					return directDial(ctx, network, addr)
 				}
 				return dialFunc(ctx, network, addr)
 			}
-			// tcpOnly=true: advertise CONNECT only — L4 has no UDP ASSOCIATE path.
-			return createSocksServer(username, password, resolver, dialWithTarget, idleTimeout, verbose, true)
+			// tcpOnly gates UDP ASSOCIATE at SOCKS negotiation: only "direct" mode
+			// advertises (and then directly relays) UDP; "block" stays CONNECT-only.
+			return createSocksServer(username, password, resolver, dialWithTarget, idleTimeout, verbose, !directUDP)
 		},
 	)
 	runtime.SetVerboseLogging(verbose)
