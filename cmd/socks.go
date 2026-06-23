@@ -43,9 +43,7 @@ func runSocksCmd(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("failed to get config path: %w", err)
 		}
-		if configPath == "" {
-			configPath = "config.json"
-		}
+		configPath = config.ResolveConfigPath(configPath)
 
 		if err := config.LoadPublicConfig(configPath); err != nil {
 			if !errors.Is(err, os.ErrNotExist) {

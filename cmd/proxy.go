@@ -107,9 +107,7 @@ func runProxyCmd(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to get config path: %w", err)
 	}
-	if configPath == "" {
-		configPath = "config.json"
-	}
+	configPath = config.ResolveConfigPath(configPath)
 	customLicense, _ := cmd.Flags().GetString("license")
 	customLicense = strings.TrimSpace(customLicense)
 	customJWT, _ := cmd.Flags().GetString("jwt")

@@ -25,17 +25,29 @@ var rootCmd = &cobra.Command{
 			return fmt.Errorf("failed to get config path: %w", err)
 		}
 
-		if configPath != "" {
-			if err := config.LoadConfig(configPath); err != nil {
-				if errors.Is(err, os.ErrNotExist) {
-					slog.Info("config file not found, continuing without preloaded config", "path", configPath)
-					return nil
-				}
-				return fmt.Errorf("failed to load config %q: %w; delete config and reinitialize", configPath, err)
-			}
-
-			config.AppConfig.Logging = logging.Setup(config.AppConfig.Logging)
+		// Prefer config.yaml; one-time upgrade a legacy config.json to YAML when
+		// no explicit --config was given. The resolved path is written back to
+		// the flag so downstream commands (save, jwt, key.json) reuse it.
+		resolved, migrated, err := config.MigrateLegacyJSONConfigPath(configPath)
+		if err != nil {
+			return fmt.Errorf("failed to migrate legacy config: %w", err)
 		}
+		if migrated {
+			slog.Info("migrated legacy config.json to config.yaml", "backup", "config.json.bak")
+		}
+		if err := cmd.Flags().Set("config", resolved); err != nil {
+			return fmt.Errorf("failed to set resolved config path: %w", err)
+		}
+
+		if err := config.LoadConfig(resolved); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				slog.Info("config file not found, continuing without preloaded config", "path", resolved)
+				return nil
+			}
+			return fmt.Errorf("failed to load config %q: %w; delete config and reinitialize", resolved, err)
+		}
+
+		config.AppConfig.Logging = logging.Setup(config.AppConfig.Logging)
 
 		return nil
 	},
@@ -55,5 +67,5 @@ func shouldSkipConfigLoad(cmd *cobra.Command) bool {
 }
 
 func init() {
-	rootCmd.PersistentFlags().StringP("config", "c", "config.json", "config file (default is config.json)")
+	rootCmd.PersistentFlags().StringP("config", "c", "", "config file (default: config.yaml, falling back to config.json)")
 }

@@ -67,13 +67,20 @@ docker run -d \
 
 On first startup, USCF registers a free Warp account and writes:
 
-- `/etc/uscf/config.json`: reusable runtime settings such as SOCKS bind, port, auth, logging.
+- `/etc/uscf/config.yaml`: reusable runtime settings such as SOCKS bind, port, auth, logging.
 - `/etc/uscf/key.json`: usque account state and MASQUE identity such as `account_mode`, token, keys, endpoints, and assigned IPs.
+
+The reusable config is YAML (`config.yaml`). A legacy `config.json` is still read
+for backward compatibility, and `uscf proxy` auto-upgrades it on next run —
+writing `config.yaml` and renaming the original to `config.json.bak`. Identity
+material (`key.json`) always stays JSON. When no `--config/-c` is given, USCF
+looks for `config.yaml`, then `config.yml`, then `config.json`; an explicit
+`-c some.json` is honored verbatim and never migrated.
 
 To preconfigure the SOCKS listener before first run:
 
 ```bash
-cp examples/usque-basic/config.json /etc/uscf/config.json
+cp examples/usque-basic/config.yaml /etc/uscf/config.yaml
 ```
 
 Then start the same container command above.

@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"sigs.k8s.io/yaml"
 )
 
 // Duration 是人类可读的时长类型，在 JSON 中支持字符串（如 "2s"、"5m"）或纳秒数字（向后兼容）。
@@ -216,16 +218,9 @@ func LoadConfig(configPath string) error {
 		configPath = "config.json"
 	}
 
-	file, err := os.Open(configPath)
-	if err != nil {
-		return fmt.Errorf("failed to open config file: %w", err)
-	}
-	defer file.Close()
-
 	var legacy legacyConfig
-	decoder := json.NewDecoder(file)
-	if err := decoder.Decode(&legacy); err != nil {
-		return fmt.Errorf("failed to decode config file: %w", err)
+	if err := decodeConfigFile(configPath, &legacy); err != nil {
+		return err
 	}
 
 	AppConfig = Config{
@@ -256,7 +251,7 @@ func LoadConfig(configPath string) error {
 			if err := writeJSONFile(keyPath, legacyKey); err != nil {
 				return fmt.Errorf("failed to write key file during migration: %w", err)
 			}
-			if err := writeJSONFile(configPath, extractPublicConfig(AppConfig)); err != nil {
+			if err := writeConfigFile(configPath, extractPublicConfig(AppConfig)); err != nil {
 				return fmt.Errorf("failed to rewrite config file during migration: %w", err)
 			}
 		}
@@ -300,16 +295,9 @@ func LoadPublicConfig(configPath string) error {
 		configPath = "config.json"
 	}
 
-	file, err := os.Open(configPath)
-	if err != nil {
-		return fmt.Errorf("failed to open config file: %w", err)
-	}
-	defer file.Close()
-
 	var public PublicConfig
-	decoder := json.NewDecoder(file)
-	if err := decoder.Decode(&public); err != nil {
-		return fmt.Errorf("failed to decode config file: %w", err)
+	if err := decodeConfigFile(configPath, &public); err != nil {
+		return err
 	}
 
 	AppConfig = Config{
@@ -520,7 +508,7 @@ func (*Config) SaveConfig(configPath string) error {
 		return err
 	}
 
-	if err := writeJSONFile(configPath, extractPublicConfig(normalized)); err != nil {
+	if err := writeConfigFile(configPath, extractPublicConfig(normalized)); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 	if err := writeJSONFile(keyConfigPath(configPath), extractKeyConfig(normalized)); err != nil {
@@ -605,6 +593,114 @@ func writeJSONFile(path string, v interface{}) error {
 	}
 
 	return nil
+}
+
+// isYAMLPath reports whether path uses a YAML file extension (.yaml/.yml).
+func isYAMLPath(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".yaml", ".yml":
+		return true
+	default:
+		return false
+	}
+}
+
+// decodeConfigFile reads a config file and unmarshals it into v. Both YAML and
+// JSON inputs are accepted (JSON is a subset of YAML), so a path is decoded the
+// same way regardless of extension. The struct's existing `json:` tags and the
+// Duration JSON (un)marshalers are reused via sigs.k8s.io/yaml. The returned
+// error wraps os.ErrNotExist when the file is missing so callers can detect it.
+func decodeConfigFile(path string, v interface{}) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("failed to open config file: %w", err)
+	}
+	if err := yaml.Unmarshal(data, v); err != nil {
+		return fmt.Errorf("failed to decode config file: %w", err)
+	}
+	return nil
+}
+
+// writeConfigFile writes v to path, choosing the encoding from the file
+// extension: YAML for .yaml/.yml, otherwise prettified JSON (legacy). key.json
+// always goes through writeJSONFile directly and is unaffected.
+func writeConfigFile(path string, v interface{}) error {
+	if !isYAMLPath(path) {
+		return writeJSONFile(path, v)
+	}
+	data, err := yaml.Marshal(v)
+	if err != nil {
+		return fmt.Errorf("failed to encode yaml to %q: %w", path, err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("failed to write file %q: %w", path, err)
+	}
+	return nil
+}
+
+// Candidate config filenames probed (in order) when no explicit path is given.
+var configFileCandidates = []string{"config.yaml", "config.yml", "config.json"}
+
+// ResolveConfigPath decides which config file to use. A non-empty explicit path
+// is honored verbatim. Otherwise the current directory is probed for
+// config.yaml, config.yml, then a legacy config.json; the first that exists
+// wins. When none exist it defaults to config.yaml (the path a fresh config is
+// written to).
+func ResolveConfigPath(explicit string) string {
+	if strings.TrimSpace(explicit) != "" {
+		return explicit
+	}
+	for _, candidate := range configFileCandidates {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	return "config.yaml"
+}
+
+// MigrateLegacyJSONConfigPath resolves the config path and, when no explicit
+// path is given and only a legacy config.json exists (no YAML sibling),
+// transcodes it to config.yaml and renames the original to config.json.bak.
+// It returns the path to use afterwards and whether a migration happened.
+//
+// An explicit path is always honored verbatim and never migrated, so users who
+// deliberately point at a .json file keep JSON behavior. key.json is never
+// touched here — identity material stays in JSON.
+func MigrateLegacyJSONConfigPath(explicit string) (path string, migrated bool, err error) {
+	if strings.TrimSpace(explicit) != "" {
+		return explicit, false, nil
+	}
+
+	// A YAML config already exists — prefer it, nothing to migrate.
+	for _, candidate := range []string{"config.yaml", "config.yml"} {
+		if _, statErr := os.Stat(candidate); statErr == nil {
+			return candidate, false, nil
+		}
+	}
+
+	const legacyPath = "config.json"
+	if _, statErr := os.Stat(legacyPath); statErr != nil {
+		// No legacy file either: fresh start, write to config.yaml.
+		return "config.yaml", false, nil
+	}
+
+	jsonData, readErr := os.ReadFile(legacyPath)
+	if readErr != nil {
+		return "", false, fmt.Errorf("failed to read legacy config %q: %w", legacyPath, readErr)
+	}
+	yamlData, convErr := yaml.JSONToYAML(jsonData)
+	if convErr != nil {
+		return "", false, fmt.Errorf("failed to convert legacy config %q to yaml: %w", legacyPath, convErr)
+	}
+
+	const newPath = "config.yaml"
+	if writeErr := os.WriteFile(newPath, yamlData, 0o644); writeErr != nil {
+		return "", false, fmt.Errorf("failed to write %q during migration: %w", newPath, writeErr)
+	}
+	if renameErr := os.Rename(legacyPath, legacyPath+".bak"); renameErr != nil {
+		return "", false, fmt.Errorf("failed to back up %q during migration: %w", legacyPath, renameErr)
+	}
+	return newPath, true, nil
 }
 
 // InitNewConfig initializes a new configuration with default values.

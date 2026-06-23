@@ -2,9 +2,22 @@
 
 USCF uses split configuration files for new deployments.
 
-- `config.json` is reusable runtime configuration.
-- `key.json` is usque account and MASQUE identity state.
+- `config.yaml` is reusable runtime configuration (YAML; the preferred format).
+- `key.json` is usque account and MASQUE identity state (always JSON).
 - `wg-account.json` and `wgcf.conf` are WG-mode state files.
+
+### Config format and migration
+
+The reusable config is YAML. A legacy `config.json` is still read transparently
+(JSON is valid YAML), so existing deployments keep working. On the next
+`uscf proxy` run with no explicit `--config`, a lone `config.json` is auto-upgraded:
+its contents are transcoded to `config.yaml` and the original is renamed to
+`config.json.bak`. `key.json` is never converted — identity material stays JSON.
+
+Path resolution when `--config/-c` is omitted: `config.yaml` → `config.yml` →
+`config.json`, else a fresh `config.yaml` is created. An explicit path is honored
+verbatim and chooses its encoding by extension (`.yaml`/`.yml` → YAML, otherwise
+JSON), so `-c some.json` keeps full JSON behavior and is never migrated.
 
 Do not put secrets into public examples. Real customer deployments should keep `/app/etc` private.
 

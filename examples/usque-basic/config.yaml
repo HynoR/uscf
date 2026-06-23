@@ -1,0 +1,19 @@
+# uscf reusable runtime config (YAML).
+#
+# YAML is the preferred format as of the config.yaml migration; a legacy
+# config.json is still read, and `uscf proxy` auto-upgrades it to config.yaml
+# (backing the original up as config.json.bak). Identity material lives in a
+# sibling key.json, which always stays JSON.
+#
+# Durations accept human-readable strings ("30s", "5m") or raw nanoseconds.
+socks:
+  bind_address: 0.0.0.0
+  port: "1080"
+  username: ""
+  password: ""
+logging:
+  level: info
+  format: text
+  socks_verbose: false
+registration:
+  device_name: uscf

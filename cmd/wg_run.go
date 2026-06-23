@@ -74,9 +74,7 @@ func runWGRunCmd(cmd *cobra.Command, args []string) error {
 	// block); only the transport differs.
 	if !config.ConfigLoaded {
 		configPath, _ := cmd.Flags().GetString("config")
-		if configPath == "" {
-			configPath = "config.json"
-		}
+		configPath = config.ResolveConfigPath(configPath)
 		if err := config.LoadPublicConfig(configPath); err != nil {
 			if !errors.Is(err, os.ErrNotExist) {
 				return fmt.Errorf("load config %q: %w", configPath, err)

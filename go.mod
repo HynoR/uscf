@@ -13,6 +13,7 @@ require (
 	golang.org/x/sync v0.21.0
 	golang.zx2c4.com/wireguard v0.0.0-20250505131008-436f7fdc1670
 	gvisor.dev/gvisor v0.0.0-20250503011706-39ed1f5ac29c
+	sigs.k8s.io/yaml v1.4.0
 )
 
 require (
