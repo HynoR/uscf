@@ -51,12 +51,20 @@ type txthinkingAdapter struct {
 	// the per-connection models.TimeoutConn deadlines applied at dial time.
 	idleTimeout time.Duration
 
+	// halfOpenIdle, when >0, caps how long a TCP relay's surviving direction may
+	// stay idle once the other direction has finished (half-open). It re-arms on
+	// activity, so an active/slow-but-streaming survivor is never cut; only a
+	// truly idle half-open flow is reaped — at this timeout instead of the full
+	// idleTimeout. Set for L4 (where a lingering half-open flow pins a QUIC stream
+	// on the shared connection against MAX_STREAMS); 0 disables it (L3 unchanged).
+	halfOpenIdle time.Duration
+
 	// udpSem is a counting semaphore bounding live upstream UDP connections to
 	// maxConcurrentUDPUpstreams across all associations served by this adapter.
 	udpSem chan struct{}
 }
 
-func newTxthinkingAdapter(username, password string, resolver api.NameResolver, dial targetDialFunc, idleTimeout time.Duration, verbose bool, tcpOnly bool) *txthinkingAdapter {
+func newTxthinkingAdapter(username, password string, resolver api.NameResolver, dial targetDialFunc, idleTimeout, halfOpenIdle time.Duration, verbose bool, tcpOnly bool) *txthinkingAdapter {
 	method := socks5.MethodNone
 	if username != "" && password != "" {
 		method = socks5.MethodUsernamePassword
@@ -75,12 +83,13 @@ func newTxthinkingAdapter(username, password string, resolver api.NameResolver, 
 			Password:          password,
 			SupportedCommands: supported,
 		},
-		resolver:    resolver,
-		dial:        dial,
-		bufPool:     api.NewNetBuffer(32 * 1024),
-		verbose:     verbose,
-		idleTimeout: idleTimeout,
-		udpSem:      make(chan struct{}, maxConcurrentUDPUpstreams),
+		resolver:     resolver,
+		dial:         dial,
+		bufPool:      api.NewNetBuffer(32 * 1024),
+		verbose:      verbose,
+		idleTimeout:  idleTimeout,
+		halfOpenIdle: halfOpenIdle,
+		udpSem:       make(chan struct{}, maxConcurrentUDPUpstreams),
 	}
 }
 
@@ -162,15 +171,27 @@ func (a *txthinkingAdapter) handleConnect(conn net.Conn, req *socks5.Request) er
 // relayTCP copies bytes in both directions until BOTH halves finish. Each
 // direction signals a TCP half-close to its destination when its source EOFs,
 // so a peer that closes only its write side (e.g. an HTTP client that finished
-// the request but still awaits the response) is not torn down prematurely. Both
-// ends carry a models.TimeoutConn idle deadline, so a half-open direction that
-// goes silent is still reclaimed rather than hanging forever.
+// the request but still awaits the response) is not torn down prematurely.
+//
+// Once the FIRST direction finishes, the flow is half-open. Both ends carry a
+// models.TimeoutConn idle deadline (default minutes), but for L4 a half-open flow
+// that goes silent would pin its QUIC stream on the shared connection for that
+// whole window — and under load those accumulate against the connection's
+// MAX_STREAMS until new dials block. So when halfOpenIdle is set, we shorten the
+// surviving direction's re-arming idle bound the moment the first half ends. The
+// bound re-arms on activity, so a still-active survivor (a slow/long response
+// after the client finished its request) keeps transferring and is not cut; only
+// a truly idle half-open flow is reaped — in seconds instead of minutes.
 func (a *txthinkingAdapter) relayTCP(client, upstream net.Conn) error {
 	errc := make(chan error, 2)
 	go func() { errc <- a.copyHalf(upstream, client) }() // client -> upstream
 	go func() { errc <- a.copyHalf(client, upstream) }() // upstream -> client
 
 	err1 := <-errc
+	if a.halfOpenIdle > 0 {
+		shortenRelayIdle(client, a.halfOpenIdle)
+		shortenRelayIdle(upstream, a.halfOpenIdle)
+	}
 	err2 := <-errc
 	_ = client.Close()
 	_ = upstream.Close()
@@ -178,6 +199,18 @@ func (a *txthinkingAdapter) relayTCP(client, upstream net.Conn) error {
 		return err1
 	}
 	return err2
+}
+
+// shortenRelayIdle lowers a relay connection's re-arming idle bound (so a now
+// half-open flow is reclaimed quickly) and immediately re-bounds any in-flight
+// blocked Read, so the surviving direction does not have to wait out the old,
+// far-future deadline. It re-arms on activity via TimeoutConn, so an active
+// survivor is not affected.
+func shortenRelayIdle(conn net.Conn, idle time.Duration) {
+	if s, ok := conn.(interface{ SetIdleTimeout(time.Duration) }); ok {
+		s.SetIdleTimeout(idle)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(idle))
 }
 
 // copyHalf copies src->dst with a pooled buffer (so models.TimeoutConn deadline

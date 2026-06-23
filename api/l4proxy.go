@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -31,6 +32,12 @@ import (
 const (
 	defaultL4ConnectTimeout    = 15 * time.Second
 	defaultL4ConnectRetryCount = 2
+	defaultL4PoolSize          = 1
+	// defaultL4StreamOpenTimeout bounds a single OpenRequestStream attempt so a
+	// saturated connection (peer MAX_STREAMS reached → OpenStreamSync blocks) is
+	// detected quickly and the dial can fall through to another pooled connection
+	// instead of stalling. It is clamped to the connect timeout.
+	defaultL4StreamOpenTimeout = 5 * time.Second
 )
 
 // L4ProxyConfig configures a new L4Proxy.
@@ -49,10 +56,17 @@ type L4ProxyConfig struct {
 	ConnectTimeout time.Duration
 	// ConnectRetryCount is how many times DialContext retries opening a stream.
 	ConnectRetryCount int
+	// PoolSize is how many shared QUIC connections to spread streams across, so
+	// concurrent streams are not bounded by one connection's MAX_STREAMS. <=0 uses
+	// the default.
+	PoolSize int
 }
 
 // L4Proxy opens one HTTP/3 CONNECT stream for each proxied TCP connection,
-// multiplexed over a single cached QUIC connection.
+// multiplexed over a small pool of cached QUIC connections. A pool (rather than a
+// single shared connection) lets concurrent stream count exceed one connection's
+// peer-imposed MAX_STREAMS, and isolates a dead/saturated connection to its own
+// slot so other flows keep working.
 type L4Proxy struct {
 	tlsConfig         *tls.Config
 	quicConfig        *quic.Config
@@ -60,10 +74,23 @@ type L4Proxy struct {
 	endpointSelector  func() net.Addr
 	connectTimeout    time.Duration
 	connectRetryCount int
+	streamOpenTimeout time.Duration
+	poolSize          int // immutable; == len(clients). Read locklessly in DialContext.
 
-	connMu sync.Mutex
-	client *l4HTTP3Client
+	connMu  sync.Mutex
+	closed  bool             // set by Close; blocks a racing in-flight dial from storing
+	clients []*l4HTTP3Client // len == poolSize; nil slots are (re)built lazily
+	next    atomic.Uint64    // round-robin cursor over pool slots
 }
+
+// errL4ProxyClosed is returned when a dial loses the race with Close.
+var errL4ProxyClosed = errors.New("l4 proxy closed")
+
+// errL4PoolSaturated is returned when every pooled connection is at the peer's
+// MAX_STREAMS (OpenStreamSync blocked past streamOpenTimeout), so no new stream
+// could be opened. It is distinct from an unreachable endpoint: the connections
+// are alive, just busy, and recover as in-flight flows free their streams.
+var errL4PoolSaturated = errors.New("l4 connection pool saturated (all shared QUIC connections at MAX_STREAMS)")
 
 type l4HTTP3Client struct {
 	udpConn    *net.UDPConn
@@ -85,6 +112,23 @@ func NewL4Proxy(cfg L4ProxyConfig) (*L4Proxy, error) {
 	if cfg.ConnectRetryCount <= 0 {
 		cfg.ConnectRetryCount = defaultL4ConnectRetryCount
 	}
+	if cfg.PoolSize <= 0 {
+		cfg.PoolSize = defaultL4PoolSize
+	}
+	// Bound a single stream-open attempt so a saturated connection is detected fast,
+	// and ensure the whole pool can be swept within one connect timeout under
+	// saturation (poolSize * streamOpenTimeout <= connectTimeout), with a 1s floor so
+	// a momentarily-busy healthy connection is not falsely skipped.
+	streamOpenTimeout := defaultL4StreamOpenTimeout
+	if perSlot := cfg.ConnectTimeout / time.Duration(cfg.PoolSize); perSlot > 0 && perSlot < streamOpenTimeout {
+		streamOpenTimeout = perSlot
+	}
+	if streamOpenTimeout > cfg.ConnectTimeout {
+		streamOpenTimeout = cfg.ConnectTimeout
+	}
+	if streamOpenTimeout < time.Second {
+		streamOpenTimeout = time.Second
+	}
 
 	return &L4Proxy{
 		tlsConfig:         cfg.TLSConfig,
@@ -93,31 +137,45 @@ func NewL4Proxy(cfg L4ProxyConfig) (*L4Proxy, error) {
 		endpointSelector:  cfg.EndpointSelector,
 		connectTimeout:    cfg.ConnectTimeout,
 		connectRetryCount: cfg.ConnectRetryCount,
+		streamOpenTimeout: streamOpenTimeout,
+		poolSize:          cfg.PoolSize,
+		clients:           make([]*l4HTTP3Client, cfg.PoolSize),
 	}, nil
 }
 
-// Connect eagerly establishes (or validates) the shared QUIC connection. It is
-// optional — DialContext establishes lazily — but lets callers fail fast / log a
-// "ready" line at startup.
+// Connect eagerly establishes (or validates) the first pooled QUIC connection. It
+// is optional — DialContext establishes lazily — but lets callers fail fast / log a
+// "ready" line at startup. Remaining pool slots are built lazily on demand.
 func (p *L4Proxy) Connect(ctx context.Context) error {
-	_, err := p.getOrCreateClientConn(ctx)
+	_, err := p.getOrCreateClientConnAt(ctx, 0)
 	return err
 }
 
-// Close tears down the shared QUIC connection, if any.
+// Close tears down every pooled QUIC connection. After Close, a dial that was
+// in flight (blocked in quic.Dial) is prevented from storing its new connection
+// into the pool (see getOrCreateClientConnAt), so nothing leaks past Close.
 func (p *L4Proxy) Close() error {
 	p.connMu.Lock()
-	client := p.client
-	p.client = nil
+	p.closed = true
+	clients := make([]*l4HTTP3Client, len(p.clients))
+	copy(clients, p.clients)
+	for i := range p.clients {
+		p.clients[i] = nil
+	}
 	p.connMu.Unlock()
-	if client != nil {
-		closeL4HTTP3(client.udpConn, client.quicConn)
+	for _, client := range clients {
+		if client != nil {
+			closeL4HTTP3(client.udpConn, client.quicConn)
+		}
 	}
 	return nil
 }
 
 // DialContext connects target (an "ip:port" authority) over an L4 MASQUE
-// HTTP/3 CONNECT stream and returns it as a net.Conn.
+// HTTP/3 CONNECT stream and returns it as a net.Conn. It sweeps the connection
+// pool (round-robin), so a saturated (MAX_STREAMS-reached) or transiently failing
+// connection is skipped in favour of another pooled connection, all within one
+// connect timeout.
 func (p *L4Proxy) DialContext(ctx context.Context, target string) (net.Conn, error) {
 	if p == nil || p.tlsConfig == nil {
 		return nil, fmt.Errorf("missing TLS config")
@@ -130,52 +188,85 @@ func (p *L4Proxy) DialContext(ctx context.Context, target string) (net.Conn, err
 	if timeout <= 0 {
 		timeout = defaultL4ConnectTimeout
 	}
-	attempts := p.connectRetryCount
-	if attempts <= 0 {
-		attempts = defaultL4ConnectRetryCount
+	dialCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	poolSize := p.poolSize // immutable; avoids a lockless read of the p.clients header
+	if poolSize <= 0 {
+		poolSize = 1
 	}
+	// Compute the modulo in uint64 so a wrapped counter never yields a negative
+	// (panicking) slice index.
+	start := int((p.next.Add(1) - 1) % uint64(poolSize))
 
 	var lastErr error
-	for range attempts {
-		dialCtx, cancel := context.WithTimeout(ctx, timeout)
-		conn, err := p.dial(dialCtx, target)
-		cancel()
+	for i := 0; i < poolSize; i++ {
+		if dialCtx.Err() != nil {
+			break
+		}
+		slot := (start + i) % poolSize
+		conn, err := p.dialOnSlot(dialCtx, slot, target)
 		if err == nil {
 			return conn, nil
 		}
 		lastErr = err
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+		// A per-target rejection (valid non-2xx) is deterministic across the pool —
+		// retrying other connections would just get the same status, so stop.
+		var statusErr *l4StatusError
+		if errors.As(err, &statusErr) {
+			break
 		}
+	}
+
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("l4 dial to %s failed", target)
 	}
 	return nil, lastErr
 }
 
-func (p *L4Proxy) dial(ctx context.Context, target string) (*l4TCPConn, error) {
-	h3Client, err := p.getOrCreateClientConn(ctx)
+// l4StatusError is a per-target CONNECT rejection (valid non-2xx response). The
+// shared connection is healthy; only this target was refused, so a dial must not
+// tear the connection down or retry other pool slots.
+type l4StatusError struct {
+	target string
+	status int
+}
+
+func (e *l4StatusError) Error() string {
+	return fmt.Sprintf("CONNECT %s rejected with status %d", e.target, e.status)
+}
+
+// dialOnSlot opens one CONNECT stream on the given pool slot's connection.
+func (p *L4Proxy) dialOnSlot(ctx context.Context, slot int, target string) (*l4TCPConn, error) {
+	h3Client, err := p.getOrCreateClientConnAt(ctx, slot)
 	if err != nil {
 		return nil, err
 	}
 
-	stream, err := h3Client.clientConn.OpenRequestStream(ctx)
+	// Bound the stream open so a saturated connection (peer MAX_STREAMS reached →
+	// OpenStreamSync blocks) is detected quickly and the caller falls through to the
+	// next pool slot, instead of stalling the whole connect timeout on one slot.
+	openCtx, cancelOpen := context.WithTimeout(ctx, p.streamOpenTimeout)
+	stream, err := h3Client.clientConn.OpenRequestStream(openCtx)
+	cancelOpen()
 	if err != nil {
-		if !shouldReconnectOnOpenStreamError(ctx, err) {
+		// A real (non-deadline) open error means the connection is likely stale; drop
+		// this slot so it rebuilds.
+		if shouldReconnectOnOpenStreamError(ctx, err) {
+			p.clearSlotIfCurrent(slot, h3Client)
 			return nil, err
 		}
-		// The cached HTTP/3 connection might be stale (e.g. Cloudflare evicted it
-		// after the idle timeout); reconnect once and retry.
-		p.closeClientConnIfCurrent(h3Client)
-		h3Client, err = p.getOrCreateClientConn(ctx)
-		if err != nil {
-			return nil, err
+		// Our per-slot openCtx fired while the parent ctx is still live: the
+		// connection is alive but saturated (MAX_STREAMS). Keep the slot and report
+		// saturation distinctly so the sweep can try another slot and the caller
+		// isn't told the endpoint is unreachable.
+		if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+			return nil, errL4PoolSaturated
 		}
-		stream, err = h3Client.clientConn.OpenRequestStream(ctx)
-		if err != nil {
-			if shouldReconnectOnOpenStreamError(ctx, err) {
-				p.closeClientConnIfCurrent(h3Client)
-			}
-			return nil, err
-		}
+		return nil, err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodConnect, "https://"+target, nil)
@@ -186,20 +277,20 @@ func (p *L4Proxy) dial(ctx context.Context, target string) (*l4TCPConn, error) {
 	req.Host = target
 	if err := stream.SendRequestHeader(req); err != nil {
 		closeL4Stream(stream)
-		p.dropConnIfDead(h3Client)
+		p.dropConnIfDead(slot, h3Client)
 		return nil, err
 	}
 	response, err := stream.ReadResponse()
 	if err != nil {
 		closeL4Stream(stream)
-		p.dropConnIfDead(h3Client)
+		p.dropConnIfDead(slot, h3Client)
 		return nil, err
 	}
 	if response.StatusCode < 200 || response.StatusCode > 299 {
-		// A valid non-2xx response means the shared connection is healthy and only
-		// this target was rejected: close just the stream, never the connection.
+		// A valid non-2xx response means the connection is healthy and only this
+		// target was rejected: close just the stream, never the connection.
 		closeL4Stream(stream)
-		return nil, fmt.Errorf("CONNECT %s rejected with status %d", target, response.StatusCode)
+		return nil, &l4StatusError{target: target, status: response.StatusCode}
 	}
 	return &l4TCPConn{stream: stream, local: h3Client.udpConn.LocalAddr(), remote: l4Addr(target)}, nil
 }
@@ -231,10 +322,17 @@ func (p *L4Proxy) selectEndpoint() *net.UDPAddr {
 	return p.endpoint
 }
 
-func (p *L4Proxy) getOrCreateClientConn(ctx context.Context) (*l4HTTP3Client, error) {
+func (p *L4Proxy) getOrCreateClientConnAt(ctx context.Context, slot int) (*l4HTTP3Client, error) {
 	p.connMu.Lock()
-	if p.client != nil {
-		client := p.client
+	if p.closed {
+		p.connMu.Unlock()
+		return nil, errL4ProxyClosed
+	}
+	if slot < 0 || slot >= len(p.clients) {
+		p.connMu.Unlock()
+		return nil, fmt.Errorf("l4 pool slot %d out of range", slot)
+	}
+	if client := p.clients[slot]; client != nil {
 		p.connMu.Unlock()
 		return client, nil
 	}
@@ -258,67 +356,70 @@ func (p *L4Proxy) getOrCreateClientConn(ctx context.Context) (*l4HTTP3Client, er
 	}
 
 	p.connMu.Lock()
-	if p.client != nil {
-		// Lost the race: another goroutine created the shared connection first.
-		current := p.client
+	if p.closed {
+		// Close ran while we were dialing: do not store (it would leak past Close).
 		p.connMu.Unlock()
 		closeL4HTTP3(newClient.udpConn, newClient.quicConn)
-		return current, nil
+		return nil, errL4ProxyClosed
 	}
-	p.client = newClient
+	if client := p.clients[slot]; client != nil {
+		// Lost the race: another goroutine filled this slot first.
+		p.connMu.Unlock()
+		closeL4HTTP3(newClient.udpConn, newClient.quicConn)
+		return client, nil
+	}
+	p.clients[slot] = newClient
 	p.connMu.Unlock()
-	slog.Debug("l4 proxy established shared QUIC connection", "endpoint", endpoint.String())
-	go p.watchClientConn(newClient)
+	slog.Debug("l4 proxy established pooled QUIC connection", "endpoint", endpoint.String(), "slot", slot)
+	go p.watchClientConn(slot, newClient)
 
 	return newClient, nil
 }
 
-// watchClientConn evicts the cached shared connection from the cache as soon as
-// its underlying QUIC connection dies — idle eviction by Cloudflare, a server
-// close, or a path/keepalive failure detected by quic-go. Without this, a dead
-// connection lingers in the cache: OpenRequestStream still succeeds locally, so
-// the reconnect-on-open-error path never triggers, and every new dial blocks in
-// ReadResponse until its timeout. Proactively dropping the dead connection lets
-// the next dial rebuild immediately instead of stalling all flows. The goroutine
-// exits when the connection is closed (Done fires) — including on Close() — so it
-// does not leak.
-func (p *L4Proxy) watchClientConn(client *l4HTTP3Client) {
+// watchClientConn evicts a pooled connection from its slot as soon as its
+// underlying QUIC connection dies — idle eviction by Cloudflare, a server close, or
+// a path/keepalive failure detected by quic-go. Without this, a dead connection
+// lingers in its slot: OpenRequestStream still succeeds locally, so the
+// reconnect-on-open-error path never triggers, and every dial routed to that slot
+// blocks until timeout. Proactively clearing the slot lets the next dial rebuild
+// it. The goroutine exits when the connection is closed (Done fires) — including on
+// Close() — so it does not leak.
+func (p *L4Proxy) watchClientConn(slot int, client *l4HTTP3Client) {
 	if client == nil || client.quicConn == nil {
 		return
 	}
 	<-client.quicConn.Context().Done()
-	slog.Debug("l4 proxy shared QUIC connection closed; invalidating cache",
-		"cause", context.Cause(client.quicConn.Context()))
-	p.closeClientConnIfCurrent(client)
+	slog.Debug("l4 proxy pooled QUIC connection closed; clearing slot",
+		"slot", slot, "cause", context.Cause(client.quicConn.Context()))
+	p.clearSlotIfCurrent(slot, client)
 }
 
-// dropConnIfDead invalidates the cached shared connection when its underlying
-// QUIC connection has already died. Called on dial-time transport errors
-// (SendRequestHeader / ReadResponse) so that the first dial to observe a path
-// failure frees every other in-flight and subsequent dial to rebuild, instead of
-// each one independently blocking on the same dead connection. A per-target
-// rejection (a valid non-2xx HTTP response) never reaches here, so a single bad
-// target never tears down the connection shared by all other live flows.
-func (p *L4Proxy) dropConnIfDead(client *l4HTTP3Client) {
+// dropConnIfDead clears a pooled slot when its connection has already died. Called
+// on dial-time transport errors (SendRequestHeader / ReadResponse) so the first
+// dial to observe a path failure frees the slot for rebuild instead of every dial
+// independently blocking on the same dead connection. A per-target rejection (a
+// valid non-2xx response) never reaches here, so a single bad target never tears
+// down a connection shared by other live flows.
+func (p *L4Proxy) dropConnIfDead(slot int, client *l4HTTP3Client) {
 	if client != nil && client.quicConn != nil && client.quicConn.Context().Err() != nil {
-		p.closeClientConnIfCurrent(client)
+		p.clearSlotIfCurrent(slot, client)
 	}
 }
 
-// closeClientConnIfCurrent drops the shared connection only if it is still the
-// one the caller observed, so concurrent dials that already reconnected are not
-// torn down.
-func (p *L4Proxy) closeClientConnIfCurrent(expected *l4HTTP3Client) {
+// clearSlotIfCurrent drops a pooled connection only if the slot still holds the
+// one the caller observed, so a concurrent dial that already rebuilt the slot is
+// not torn down.
+func (p *L4Proxy) clearSlotIfCurrent(slot int, expected *l4HTTP3Client) {
 	if expected == nil {
 		return
 	}
 
 	p.connMu.Lock()
-	if p.client != expected {
+	if slot < 0 || slot >= len(p.clients) || p.clients[slot] != expected {
 		p.connMu.Unlock()
 		return
 	}
-	p.client = nil
+	p.clients[slot] = nil
 	p.connMu.Unlock()
 
 	closeL4HTTP3(expected.udpConn, expected.quicConn)

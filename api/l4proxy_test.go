@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -232,15 +233,106 @@ func TestL4ProxyCloseIsSafe(t *testing.T) {
 	}
 }
 
+func TestNewL4ProxyPoolSize(t *testing.T) {
+	endpoint := &net.UDPAddr{IP: net.IPv4(1, 1, 1, 1), Port: 443}
+
+	// Default pool size when unset / non-positive.
+	p, err := NewL4Proxy(L4ProxyConfig{TLSConfig: &tls.Config{}, Endpoint: endpoint})
+	if err != nil {
+		t.Fatalf("NewL4Proxy: %v", err)
+	}
+	if len(p.clients) != defaultL4PoolSize {
+		t.Fatalf("default pool size = %d, want %d", len(p.clients), defaultL4PoolSize)
+	}
+
+	// Explicit pool size.
+	p2, err := NewL4Proxy(L4ProxyConfig{TLSConfig: &tls.Config{}, Endpoint: endpoint, PoolSize: 5})
+	if err != nil {
+		t.Fatalf("NewL4Proxy: %v", err)
+	}
+	if len(p2.clients) != 5 {
+		t.Fatalf("pool size = %d, want 5", len(p2.clients))
+	}
+
+	// streamOpenTimeout is clamped to the (smaller) connect timeout.
+	p3, err := NewL4Proxy(L4ProxyConfig{TLSConfig: &tls.Config{}, Endpoint: endpoint, ConnectTimeout: 2 * time.Second})
+	if err != nil {
+		t.Fatalf("NewL4Proxy: %v", err)
+	}
+	if p3.streamOpenTimeout != 2*time.Second {
+		t.Fatalf("streamOpenTimeout = %v, want clamped to 2s", p3.streamOpenTimeout)
+	}
+}
+
+func TestL4ProxyClosedRejectsNewConns(t *testing.T) {
+	p, err := NewL4Proxy(L4ProxyConfig{
+		TLSConfig: &tls.Config{},
+		Endpoint:  &net.UDPAddr{IP: net.IPv4(1, 1, 1, 1), Port: 443},
+		PoolSize:  4,
+	})
+	if err != nil {
+		t.Fatalf("NewL4Proxy: %v", err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// After Close, building a connection must fail fast with errL4ProxyClosed rather
+	// than dialing and storing into the pool (which would leak past Close).
+	if _, err := p.getOrCreateClientConnAt(context.Background(), 0); !errors.Is(err, errL4ProxyClosed) {
+		t.Fatalf("getOrCreateClientConnAt after Close = %v, want errL4ProxyClosed", err)
+	}
+}
+
+func TestL4ProxyClearSlotIfCurrent(t *testing.T) {
+	p := &L4Proxy{clients: make([]*l4HTTP3Client, 3)}
+	c := &l4HTTP3Client{} // nil conns: closeL4HTTP3 is nil-safe
+
+	p.clients[1] = c
+	// Mismatched client must not clear the slot.
+	p.clearSlotIfCurrent(1, &l4HTTP3Client{})
+	if p.clients[1] != c {
+		t.Fatal("clearSlotIfCurrent must not clear on a client mismatch")
+	}
+	// Matching client clears exactly that slot.
+	p.clearSlotIfCurrent(1, c)
+	if p.clients[1] != nil {
+		t.Fatal("clearSlotIfCurrent must clear the matching slot")
+	}
+	// Naming the wrong slot for a client must not clear a different slot.
+	p.clients[2] = c
+	p.clearSlotIfCurrent(0, c)
+	if p.clients[2] != c {
+		t.Fatal("clearSlotIfCurrent must only touch the named slot")
+	}
+}
+
+func TestL4StatusError(t *testing.T) {
+	err := error(&l4StatusError{target: "1.1.1.1:443", status: 502})
+	var se *l4StatusError
+	if !errors.As(err, &se) {
+		t.Fatal("errors.As should match *l4StatusError")
+	}
+	if se.status != 502 {
+		t.Fatalf("status = %d, want 502", se.status)
+	}
+	if !strings.Contains(err.Error(), "502") || !strings.Contains(err.Error(), "1.1.1.1:443") {
+		t.Fatalf("unexpected error string: %q", err.Error())
+	}
+}
+
 func TestL4ProxyConnHealthHelpersNilSafe(t *testing.T) {
-	p := &L4Proxy{}
-	// Both helpers must tolerate nil clients / nil QUIC connections without
-	// panicking (they run on dial error paths and as a goroutine).
-	p.dropConnIfDead(nil)
-	p.dropConnIfDead(&l4HTTP3Client{})
-	p.watchClientConn(nil)
-	p.watchClientConn(&l4HTTP3Client{}) // nil quicConn returns immediately
-	if p.client != nil {
-		t.Fatal("nil-safe helpers must not set a client")
+	p := &L4Proxy{clients: make([]*l4HTTP3Client, 2)}
+	// Both helpers must tolerate nil clients / nil QUIC connections / out-of-range
+	// slots without panicking (they run on dial error paths and as a goroutine).
+	p.dropConnIfDead(0, nil)
+	p.dropConnIfDead(0, &l4HTTP3Client{})
+	p.dropConnIfDead(99, &l4HTTP3Client{}) // out-of-range slot
+	p.watchClientConn(0, nil)
+	p.watchClientConn(0, &l4HTTP3Client{}) // nil quicConn returns immediately
+	p.clearSlotIfCurrent(0, &l4HTTP3Client{})
+	for _, c := range p.clients {
+		if c != nil {
+			t.Fatal("nil-safe helpers must not populate a slot")
+		}
 	}
 }

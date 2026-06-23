@@ -947,6 +947,7 @@ type socksRuntimeMeta struct {
 	proxyTCPPorts int
 	blockUDP443   bool
 	udpMode       string // L4 UDP disposition ("block"/"direct"); empty outside L4
+	l4PoolSize    int    // L4 shared-connection pool size; 0 outside L4
 }
 
 type proxyReadyInfo struct {
@@ -1310,7 +1311,9 @@ func prepareSocksRuntime(tunNet *netstack.Net, connectionTimeout, idleTimeout ti
 				return dialFunc(ctx, network, addr)
 			}
 
-			return createSocksServer(username, password, resolver, dialWithTarget, idleTimeout, verbose, false)
+			// halfOpenIdle=0: L3 keeps its existing teardown (each flow is an
+			// independent netstack conn with no shared-connection stream ceiling).
+			return createSocksServer(username, password, resolver, dialWithTarget, idleTimeout, 0, verbose, false)
 		},
 	)
 	runtime.SetVerboseLogging(config.AppConfig.Logging.SocksVerbose)
@@ -1367,6 +1370,9 @@ func logProxyReady(listenerAddr net.Addr, idleTimeout time.Duration, info proxyR
 	}
 	if info.meta.udpMode != "" {
 		attrs = append(attrs, "l4_udp", info.meta.udpMode)
+	}
+	if info.meta.l4PoolSize > 0 {
+		attrs = append(attrs, "l4_pool", info.meta.l4PoolSize)
 	}
 	if info.meta.bypassDomains > 0 {
 		attrs = append(attrs, "bypass_domains", info.meta.bypassDomains)
@@ -1461,11 +1467,11 @@ func createSocksServer(
 	username, password string,
 	resolver api.NameResolver,
 	dialWithTarget targetDialFunc,
-	idleTimeout time.Duration,
+	idleTimeout, halfOpenIdle time.Duration,
 	verbose bool,
 	tcpOnly bool,
 ) socksServer {
-	return newTxthinkingAdapter(username, password, resolver, dialWithTarget, idleTimeout, verbose, tcpOnly)
+	return newTxthinkingAdapter(username, password, resolver, dialWithTarget, idleTimeout, halfOpenIdle, verbose, tcpOnly)
 }
 
 var errUDP443Blocked = errors.New("udp/443 blocked by config")

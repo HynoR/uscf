@@ -107,6 +107,7 @@ func setupAndRunL4Proxy(cmd *cobra.Command, overrides []string, configSaved bool
 		Endpoint:         endpoint,
 		EndpointSelector: endpointSelector,
 		ConnectTimeout:   connectionTimeout,
+		PoolSize:         config.AppConfig.Socks.L4PoolSize,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create L4 proxy: %w", err)
@@ -231,7 +232,7 @@ func prepareL4SocksRuntime(l4Proxy *api.L4Proxy, udpTunnel *l3UDPTunnel, connect
 		return nil, socksRuntimeMeta{}, err
 	}
 	bypassMatcher := routePolicy.bypassMatcher
-	meta := socksRuntimeMeta{}
+	meta := socksRuntimeMeta{l4PoolSize: config.AppConfig.Socks.L4PoolSize}
 	if routePolicy.ProxyTCPPortsEnabled() {
 		meta.proxyTCPPorts = len(routePolicy.proxyTCPPortList)
 	} else if bypassMatcher.Enabled() {
@@ -323,7 +324,9 @@ func prepareL4SocksRuntime(l4Proxy *api.L4Proxy, udpTunnel *l3UDPTunnel, connect
 			}
 			// tcpOnly gates UDP ASSOCIATE at SOCKS negotiation: "direct" and "tunnel"
 			// advertise (and then relay) UDP; "block" stays CONNECT-only.
-			return createSocksServer(username, password, resolver, dialWithTarget, idleTimeout, verbose, !udpEnabled)
+			// halfOpenIdle bounds half-open flows so a finished/idle relay cannot pin
+			// its QUIC stream on the shared connection for the full idle timeout.
+			return createSocksServer(username, password, resolver, dialWithTarget, idleTimeout, config.AppConfig.Socks.L4HalfOpenTimeout.Duration(), verbose, !udpEnabled)
 		},
 	)
 	runtime.SetVerboseLogging(verbose)

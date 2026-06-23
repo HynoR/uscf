@@ -52,7 +52,7 @@ func TestL4ProxyRecoversAfterConnDeath(t *testing.T) {
 	_ = conn1.Close()
 
 	p.connMu.Lock()
-	dead := p.client
+	dead := p.clients[0]
 	p.connMu.Unlock()
 	if dead == nil || dead.quicConn == nil {
 		t.Fatalf("expected a cached shared connection after first dial")
@@ -65,7 +65,7 @@ func TestL4ProxyRecoversAfterConnDeath(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		p.connMu.Lock()
-		current := p.client
+		current := p.clients[0]
 		p.connMu.Unlock()
 		if current != dead {
 			break // evicted (nil) or already replaced
@@ -89,7 +89,7 @@ func TestL4ProxyRecoversAfterConnDeath(t *testing.T) {
 	_ = conn2.Close()
 
 	p.connMu.Lock()
-	rebuilt := p.client
+	rebuilt := p.clients[0]
 	p.connMu.Unlock()
 	if rebuilt == nil || rebuilt == dead {
 		t.Fatalf("expected a fresh shared connection after recovery")

@@ -293,3 +293,12 @@ func (c *managedConn) CloseWrite() error {
 	}
 	return nil
 }
+
+// SetIdleTimeout forwards a re-arming idle-timeout change to the wrapped
+// connection (e.g. models.TimeoutConn) so the relay can shorten a half-open
+// flow's idle bound through this managed wrapper. No-op if unsupported.
+func (c *managedConn) SetIdleTimeout(d time.Duration) {
+	if s, ok := c.Conn.(interface{ SetIdleTimeout(time.Duration) }); ok {
+		s.SetIdleTimeout(d)
+	}
+}

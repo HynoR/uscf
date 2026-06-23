@@ -143,6 +143,8 @@ type SocksConfig struct {
 	ConnectionTimeout    Duration `json:"connection_timeout"`     // 建立连接的超时时间
 	IdleTimeout          Duration `json:"idle_timeout"`           // 空闲连接的超时时间
 	AlwaysReconnect      bool     `json:"always_reconnect"`       // true=断线后立即重连；false(默认)=隧道空闲被服务端清掉后，等到有出站流量再重连
+	L4PoolSize           int      `json:"l4_pool_size"`           // L4模式共享QUIC连接池大小(并发流分摊到多条连接,绕过单连接MAX_STREAMS上限);<=0取默认
+	L4HalfOpenTimeout    Duration `json:"l4_half_open_timeout"`   // L4模式半开TCP流的空闲上限:一方向结束后另一方向最多空闲多久就回收(随活动重置),避免滞留流占满共享连接的MAX_STREAMS;<=0取默认
 }
 
 // L4 UDP handling modes (socks.l4_udp). The L4 transport has no UDP path of its
@@ -163,6 +165,25 @@ const (
 	// mode targets workloads that are almost entirely TCP. block_udp_443 still applies
 	// (QUIC-in-QUIC over the tunnel would throttle bandwidth — apps fall back to TCP).
 	L4UDPTunnel = "tunnel"
+)
+
+// L4 shared-connection scaling and stream-lifetime defaults. L4 multiplexes every
+// TCP flow as one QUIC stream over shared QUIC connection(s), so the live-stream
+// count is bounded by Cloudflare's per-connection MAX_STREAMS. A pool of
+// connections multiplies that ceiling for high concurrency, and a short half-open
+// idle keeps a finished flow from pinning its stream for the full idle timeout.
+const (
+	// DefaultL4PoolSize is how many shared QUIC connections the L4 proxy keeps, so
+	// concurrent streams are spread across them instead of saturating one
+	// connection's MAX_STREAMS. 8 comfortably covers thousands of concurrent flows.
+	DefaultL4PoolSize = 8
+	// MaxL4PoolSize caps the pool to bound memory (each connection holds its own
+	// receive windows) against a misconfiguration.
+	MaxL4PoolSize = 64
+	// DefaultL4HalfOpenTimeout bounds how long a half-open L4 TCP relay's surviving
+	// direction may stay idle before it is reaped (re-arming on activity), instead
+	// of pinning its QUIC stream for the full idle timeout.
+	DefaultL4HalfOpenTimeout = 30 * time.Second
 )
 
 // SSHSocksConfig 包含SSH SOCKS5网关相关的配置
@@ -384,6 +405,8 @@ func GetDefaultSocksConfig() SocksConfig {
 		ConnectionTimeout:    Duration(30 * time.Second),
 		IdleTimeout:          Duration(5 * time.Minute),
 		AlwaysReconnect:      false,
+		L4PoolSize:           DefaultL4PoolSize,
+		L4HalfOpenTimeout:    Duration(DefaultL4HalfOpenTimeout),
 	}
 }
 
@@ -464,6 +487,15 @@ func NormalizeSocksConfig(cfg SocksConfig) (SocksConfig, error) {
 	}
 	if normalized.DrainGrace.Duration() <= 0 {
 		normalized.DrainGrace = GetDefaultSocksConfig().DrainGrace
+	}
+	if normalized.L4PoolSize <= 0 {
+		normalized.L4PoolSize = DefaultL4PoolSize
+	}
+	if normalized.L4PoolSize > MaxL4PoolSize {
+		normalized.L4PoolSize = MaxL4PoolSize
+	}
+	if normalized.L4HalfOpenTimeout.Duration() <= 0 {
+		normalized.L4HalfOpenTimeout = Duration(DefaultL4HalfOpenTimeout)
 	}
 	switch strings.ToLower(strings.TrimSpace(normalized.L4UDP)) {
 	case "", L4UDPBlock:

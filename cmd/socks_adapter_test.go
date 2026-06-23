@@ -22,7 +22,7 @@ func startAdapterServer(t *testing.T, username, password string) (string, func()
 	dial := func(ctx context.Context, network, addr string, _ socksTarget) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, network, addr)
 	}
-	adapter := newTxthinkingAdapter(username, password, systemDNSResolver{}, dial, 0, false, false)
+	adapter := newTxthinkingAdapter(username, password, systemDNSResolver{}, dial, 0, 0, false, false)
 
 	go func() {
 		for {
