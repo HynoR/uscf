@@ -96,9 +96,10 @@ type L4Proxy struct {
 	poolSize          int   // immutable; == len(clients). Read locklessly in DialContext.
 	maxInFlight       int64 // immutable; hard ceiling on concurrent open streams (0 = unbounded).
 
-	inFlight     atomic.Int64  // currently open CONNECT streams (reserved at dial, released on Close)
-	saturations  atomic.Uint64 // cumulative fast-fail rejections at the in-flight cap
-	lastSatLogNs atomic.Int64  // unix ns of the last saturation warning (rate-limits the log)
+	inFlight        atomic.Int64  // currently open CONNECT streams (reserved at dial, released on Close)
+	saturations     atomic.Uint64 // cumulative fast-fail rejections (local cap OR CF MAX_STREAMS)
+	lastSatLogNs    atomic.Int64  // unix ns of the last saturation warning (rate-limits the log)
+	observedCeiling atomic.Int64  // smallest in-flight level seen to block on CF MAX_STREAMS (0 = never)
 
 	connMu  sync.Mutex
 	closed  bool             // set by Close; blocks a racing in-flight dial from storing
@@ -216,22 +217,32 @@ func (p *L4Proxy) DialContext(ctx context.Context, target string) (net.Conn, err
 		return nil, fmt.Errorf("missing HTTP/3 UDP endpoint")
 	}
 
+	reserved := false
 	if p.maxInFlight > 0 {
 		if p.inFlight.Add(1) > p.maxInFlight {
 			p.inFlight.Add(-1)
 			p.recordSaturation()
 			return nil, errL4PoolSaturated
 		}
+		reserved = true
 	}
 
 	conn, err := p.dialSweep(ctx, target)
 	if err != nil {
-		if p.maxInFlight > 0 {
+		// A saturated shared connection (Cloudflare's MAX_STREAMS reached, surfaced by
+		// dialOnSlot as a bounded OpenRequestStream timeout) is counted here too, so the
+		// rejection is visible whether the local cap or Cloudflare's ceiling is the
+		// binding limit. Record before releasing so the logged in_flight reflects the
+		// saturated level.
+		if errors.Is(err, errL4PoolSaturated) {
+			p.recordSaturation()
+		}
+		if reserved {
 			p.inFlight.Add(-1)
 		}
 		return nil, err
 	}
-	if p.maxInFlight > 0 {
+	if reserved {
 		conn.onClose = func() { p.inFlight.Add(-1) }
 	}
 	return conn, nil
@@ -294,14 +305,40 @@ func (p *L4Proxy) recordSaturation() {
 	last := p.lastSatLogNs.Load()
 	if now-last > int64(5*time.Second) && p.lastSatLogNs.CompareAndSwap(last, now) {
 		slog.Warn("l4 saturated: rejecting new flows fast (shared QUIC connection at MAX_STREAMS or local cap reached)",
-			"in_flight", p.inFlight.Load(), "max_streams", p.maxInFlight, "rejected_total", n)
+			"in_flight", p.inFlight.Load(), "max_streams", p.maxInFlight, "observed_stream_ceiling", p.observedCeiling.Load(), "rejected_total", n)
 	}
 }
 
-// Stats reports the current open-stream count and the cumulative number of dials
-// fast-failed at the in-flight cap, for periodic observability.
-func (p *L4Proxy) Stats() (inFlight int64, rejected uint64) {
-	return p.inFlight.Load(), p.saturations.Load()
+// noteCeiling records the smallest in-flight level at which the shared connection's
+// OpenStreamSync blocked — an empirical estimate of Cloudflare's per-connection
+// MAX_STREAMS. It is observational only (it does not change the cap): the value is
+// logged once on first observation and surfaced via Stats, so an operator can compare
+// the real ceiling against the configured cap and the offered concurrency, and decide
+// whether one connection suffices or an overflow path (e.g. L3 spill) is needed.
+func (p *L4Proxy) noteCeiling(n int64) {
+	if n <= 0 {
+		return
+	}
+	for {
+		cur := p.observedCeiling.Load()
+		if cur != 0 && cur <= n {
+			return
+		}
+		if p.observedCeiling.CompareAndSwap(cur, n) {
+			if cur == 0 {
+				slog.Warn("l4 hit Cloudflare's per-connection stream ceiling (OpenStreamSync blocked) — this is the real MAX_STREAMS limit for a single connection",
+					"observed_stream_ceiling", n, "configured_max_streams", p.maxInFlight)
+			}
+			return
+		}
+	}
+}
+
+// Stats reports the current open-stream count, the cumulative number of dials
+// fast-failed at saturation, and the empirically observed Cloudflare per-connection
+// stream ceiling (0 if never hit), for periodic observability.
+func (p *L4Proxy) Stats() (inFlight int64, rejected uint64, observedCeiling int64) {
+	return p.inFlight.Load(), p.saturations.Load(), p.observedCeiling.Load()
 }
 
 // l4StatusError is a per-target CONNECT rejection (valid non-2xx response). The
@@ -339,8 +376,11 @@ func (p *L4Proxy) dialOnSlot(ctx context.Context, slot int, target string) (*l4T
 		// Our per-slot openCtx fired while the parent ctx is still live: the
 		// connection is alive but saturated (MAX_STREAMS). Keep the slot and report
 		// saturation distinctly so the sweep can try another slot and the caller
-		// isn't told the endpoint is unreachable.
+		// isn't told the endpoint is unreachable. Record the in-flight level at which
+		// OpenStreamSync blocked as an empirical estimate of Cloudflare's per-connection
+		// MAX_STREAMS, so an operator can see the real ceiling.
 		if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+			p.noteCeiling(p.inFlight.Load())
 			return nil, errL4PoolSaturated
 		}
 		return nil, err

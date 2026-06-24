@@ -242,11 +242,11 @@ func logL4Stats(ctx context.Context, l4Proxy *api.L4Proxy) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			inFlight, rejected := l4Proxy.Stats()
+			inFlight, rejected, ceiling := l4Proxy.Stats()
 			if rejected > lastRejected {
-				slog.Info("l4 stream stats", "in_flight", inFlight, "rejected_total", rejected, "rejected_interval", rejected-lastRejected)
+				slog.Info("l4 stream stats", "in_flight", inFlight, "observed_stream_ceiling", ceiling, "rejected_total", rejected, "rejected_interval", rejected-lastRejected)
 			} else {
-				slog.Debug("l4 stream stats", "in_flight", inFlight, "rejected_total", rejected)
+				slog.Debug("l4 stream stats", "in_flight", inFlight, "observed_stream_ceiling", ceiling, "rejected_total", rejected)
 			}
 			lastRejected = rejected
 		}

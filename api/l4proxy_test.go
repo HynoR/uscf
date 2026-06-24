@@ -382,9 +382,38 @@ func TestL4ProxyDialFastFailsAtInFlightCap(t *testing.T) {
 	if got := p.inFlight.Load(); got != 2 {
 		t.Fatalf("inFlight = %d after fast-fail, want 2 (reservation released, not leaked)", got)
 	}
-	inFlight, rejected := p.Stats()
+	inFlight, rejected, _ := p.Stats()
 	if inFlight != 2 || rejected != 1 {
 		t.Fatalf("Stats() = (%d, %d), want (2, 1)", inFlight, rejected)
+	}
+}
+
+// TestL4ProxyNoteCeiling verifies the empirical MAX_STREAMS estimate keeps the
+// smallest blocking level seen (so it converges toward the true ceiling) and is
+// surfaced via Stats. It is observational only — it must not change the cap.
+func TestL4ProxyNoteCeiling(t *testing.T) {
+	p, err := NewL4Proxy(L4ProxyConfig{
+		TLSConfig:          &tls.Config{},
+		Endpoint:           &net.UDPAddr{IP: net.IPv4(1, 1, 1, 1), Port: 443},
+		MaxInFlightStreams: 4096,
+	})
+	if err != nil {
+		t.Fatalf("NewL4Proxy: %v", err)
+	}
+
+	if _, _, ceiling := p.Stats(); ceiling != 0 {
+		t.Fatalf("initial observed ceiling = %d, want 0", ceiling)
+	}
+	p.noteCeiling(2000)
+	p.noteCeiling(2100) // higher: ignored, the tighter estimate wins
+	p.noteCeiling(1900) // lower: adopted
+	p.noteCeiling(0)    // invalid: ignored
+	if _, _, ceiling := p.Stats(); ceiling != 1900 {
+		t.Fatalf("observed ceiling = %d, want 1900 (min of observations)", ceiling)
+	}
+	// The configured cap is untouched (observation must not narrow capacity).
+	if p.maxInFlight != 4096 {
+		t.Fatalf("maxInFlight = %d, want 4096 (noteCeiling must not change the cap)", p.maxInFlight)
 	}
 }
 
