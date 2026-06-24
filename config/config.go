@@ -146,6 +146,7 @@ type SocksConfig struct {
 	L4HalfOpenTimeout    Duration `json:"l4_half_open_timeout"`   // L4模式半开TCP流的空闲上限:一方向结束后另一方向最多空闲多久就回收(随活动重置),避免滞留流占满共享连接的MAX_STREAMS;<=0取默认
 	L4ConnectionTimeout  Duration `json:"l4_connection_timeout"`  // L4模式建立连接/打开流的超时(与L3的connection_timeout隔离);<=0取默认
 	L4IdleTimeout        Duration `json:"l4_idle_timeout"`        // L4模式空闲流的超时(与L3的idle_timeout隔离)。L4每条空闲流占用稀缺的QUIC MAX_STREAMS额度,故默认显著短于L3;<=0取默认
+	L4MaxConnFailures    int      `json:"l4_max_conn_failures"`   // L4模式判定共享连接wedged(QUIC存活但CF停止应答CONNECT)前允许的连续握手失败次数;调低=更快重建但更易因瞬时抖动误判,可用于实验;<=0取默认(50)。另有按时长触发的兜底(2×l4_connection_timeout),低并发下也能及时重建
 }
 
 // L4 UDP handling modes (socks.l4_udp). The L4 transport has no UDP path of its
@@ -196,6 +197,13 @@ const (
 	// connection's scarce MAX_STREAMS budget. A re-arming activity check means an actively
 	// transferring flow is never cut; only a truly idle one is reaped.
 	DefaultL4IdleTimeout = 60 * time.Second
+	// DefaultL4MaxConnFailures is the default count threshold for the L4 wedge detector
+	// (see api.noteConnFailure): how many CONNECT handshakes may fail in a row with no
+	// Cloudflare answer before the shared connection is rebuilt. Lowered from an earlier
+	// 100 to 50 — combined with the elapsed-time trip (2×l4_connection_timeout) this
+	// recovers a wedged connection promptly without re-tripping on a transient blip.
+	// Operators can tune l4_max_conn_failures to experiment.
+	DefaultL4MaxConnFailures = 50
 )
 
 // SSHSocksConfig 包含SSH SOCKS5网关相关的配置
@@ -420,6 +428,7 @@ func GetDefaultSocksConfig() SocksConfig {
 		L4HalfOpenTimeout:    Duration(DefaultL4HalfOpenTimeout),
 		L4ConnectionTimeout:  Duration(DefaultL4ConnectionTimeout),
 		L4IdleTimeout:        Duration(DefaultL4IdleTimeout),
+		L4MaxConnFailures:    DefaultL4MaxConnFailures,
 	}
 }
 
@@ -509,6 +518,15 @@ func NormalizeSocksConfig(cfg SocksConfig) (SocksConfig, error) {
 	}
 	if normalized.L4IdleTimeout.Duration() <= 0 {
 		normalized.L4IdleTimeout = Duration(DefaultL4IdleTimeout)
+	}
+	if normalized.L4MaxConnFailures <= 0 {
+		normalized.L4MaxConnFailures = DefaultL4MaxConnFailures
+	}
+	// Keep the L4 half-open reaper a SHORTENER: a half-open timeout larger than the idle
+	// timeout would re-arm the surviving direction LONGER than a fully-open flow, inverting
+	// the guard that exists to free a stranded half-open stream's scarce QUIC stream faster.
+	if normalized.L4HalfOpenTimeout.Duration() > normalized.L4IdleTimeout.Duration() {
+		normalized.L4HalfOpenTimeout = normalized.L4IdleTimeout
 	}
 	switch strings.ToLower(strings.TrimSpace(normalized.L4UDP)) {
 	case "", L4UDPBlock:

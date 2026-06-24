@@ -101,12 +101,21 @@ func setupAndRunL4Proxy(cmd *cobra.Command, overrides []string, configSaved bool
 
 	connectionTimeout, idleTimeout := getL4TimeoutSettings()
 
+	// The shared L4 QUIC connection has no MaintainTunnel-style liveness loop — keepalive is
+	// its only defense against Cloudflare/quic-go idle-evicting it during a quiet period. A
+	// keepalive_period of 0 is fine for the lazy L3 tunnel but would self-destruct the always-on
+	// L4 connection every ~30s of idle, so l4QUICConfig floors it to 30s; warn that we did.
+	if config.AppConfig.Socks.KeepalivePeriod.Duration() <= 0 {
+		slog.Warn("l4: keepalive_period <= 0; clamping the shared QUIC connection's keepalive to 30s so it is not idle-evicted between flows", "configured", config.AppConfig.Socks.KeepalivePeriod.Duration())
+	}
+
 	l4Proxy, err := api.NewL4Proxy(api.L4ProxyConfig{
-		TLSConfig:        tlsConfig,
-		QUICConfig:       l4QUICConfig(config.AppConfig.Socks.KeepalivePeriod.Duration(), config.AppConfig.Socks.InitialPacketSize),
-		Endpoint:         endpoint,
-		EndpointSelector: endpointSelector,
-		ConnectTimeout:   connectionTimeout,
+		TLSConfig:                  tlsConfig,
+		QUICConfig:                 l4QUICConfig(config.AppConfig.Socks.KeepalivePeriod.Duration(), config.AppConfig.Socks.InitialPacketSize),
+		Endpoint:                   endpoint,
+		EndpointSelector:           endpointSelector,
+		ConnectTimeout:             connectionTimeout,
+		MaxConsecutiveConnFailures: config.AppConfig.Socks.L4MaxConnFailures,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create L4 proxy: %w", err)
@@ -149,7 +158,15 @@ func setupAndRunL4Proxy(cmd *cobra.Command, overrides []string, configSaved bool
 	// non-fatal: the proxy still serves and retries lazily on demand.
 	warmCtx, cancel := context.WithTimeout(context.Background(), connectionTimeout)
 	if err := l4Proxy.Connect(warmCtx); err != nil {
-		slog.Warn("l4 proxy warm-up failed; will retry on demand", "endpoint", endpoint.String(), "error", err)
+		// Non-fatal by design (lazy retry), but if the cause is permanent — wrong endpoint,
+		// stale enrollment, blocked UDP — the proxy then reports "ready" yet fails EVERY flow
+		// with no further proxy-level signal. Make the one warm-up line actionable so that
+		// case is diagnosable from startup instead of from a per-flow error flood.
+		slog.Warn("l4 proxy warm-up failed: the proxy is UP but every flow will fail until the endpoint/enrollment is reachable — verify endpoint/connect_port/use_ipv6 and that the WARP enrollment is current",
+			"endpoint", endpoint.String(),
+			"connect_port", config.AppConfig.Socks.ConnectPort,
+			"use_ipv6", config.AppConfig.Socks.UseIPv6,
+			"error", err)
 	}
 	cancel()
 
@@ -214,6 +231,14 @@ func selectL4Endpoint() (*net.UDPAddr, func() net.Addr, error) {
 // InitialPacketSize) to match uscf's proven L3 default rather than pinning a
 // fixed packet size.
 func l4QUICConfig(keepalivePeriod time.Duration, initialPacketSize uint16) *quic.Config {
+	// Floor the keepalive so the shared L4 connection can never be left without one: with
+	// KeepAlivePeriod=0 and MaxIdleTimeout unset, quic-go disables keepalive PINGs and falls
+	// back to its ~30s idle timeout, silently idle-closing the connection during any quiet
+	// window. mihomo/usque both pin 30s for exactly this reason. (L3 and the lazy mix UDP leg
+	// legitimately use 0 and are unaffected — this floor is L4-shared-connection-local.)
+	if keepalivePeriod <= 0 {
+		keepalivePeriod = 30 * time.Second
+	}
 	return &quic.Config{
 		EnableDatagrams:                false,
 		KeepAlivePeriod:                keepalivePeriod,
@@ -245,25 +270,53 @@ func getL4TimeoutSettings() (time.Duration, time.Duration) {
 	return connectionTimeout, idleTimeout
 }
 
-// logL4Stats periodically logs the L4 proxy's live stream count and the cumulative
-// number of shared-connection rebuilds. It logs at debug normally and bumps to info on
-// any interval where the connection was rebuilt (the actionable case: the shared
-// connection died or hit the peer's MAX_STREAMS and self-healed), so an operator sees
-// reconnects without enabling debug. Returns when ctx is cancelled.
+// l4HighInFlightFloor is the open-stream count above which a new high-water mark is
+// surfaced at info, so an operator can see the shared connection approaching saturation
+// before OpenRequestStream finally blocks. Ordinary load below it stays at debug.
+const l4HighInFlightFloor = 64
+
+// logL4Stats periodically logs the L4 proxy's live stream count, the cumulative number of
+// shared-connection rebuilds, and the current wedge-failure run. It logs at debug normally
+// and bumps to info on any actionable interval — a rebuild fired (the shared connection died
+// or hit MAX_STREAMS and self-healed), a wedge is building (consecutive_failures climbing,
+// the near-假死 state the prior incident had to be diagnosed without), or a new in-flight
+// high-water crossed the soft floor (running near the peer's stream ceiling) — so an operator
+// sees these without enabling debug. Returns when ctx is cancelled.
 func logL4Stats(ctx context.Context, l4Proxy *api.L4Proxy) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
+	// Surface a degrading connection once its un-answered run passes a quarter of the
+	// configured trip threshold — early enough to see a wedge before the rebuild.
+	softWedge := l4Proxy.MaxConsecutiveFails() / 4
+	if softWedge < 1 {
+		softWedge = 1
+	}
 	var lastReconnects uint64
+	var maxInFlight int64
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			inFlight, reconnects := l4Proxy.Stats()
-			if reconnects > lastReconnects {
-				slog.Info("l4 stream stats", "in_flight", inFlight, "reconnects_total", reconnects, "reconnects_interval", reconnects-lastReconnects)
+			consecutiveFails := l4Proxy.ConsecutiveFails()
+			newHighWater := inFlight > maxInFlight && inFlight >= l4HighInFlightFloor
+			if inFlight > maxInFlight {
+				maxInFlight = inFlight
+			}
+			if reconnects > lastReconnects || consecutiveFails >= softWedge || newHighWater {
+				slog.Info("l4 stream stats",
+					"in_flight", inFlight,
+					"in_flight_high_water", maxInFlight,
+					"consecutive_failures", consecutiveFails,
+					"reconnects_total", reconnects,
+					"reconnects_interval", reconnects-lastReconnects)
 			} else {
-				slog.Debug("l4 stream stats", "in_flight", inFlight, "reconnects_total", reconnects)
+				slog.Debug("l4 stream stats",
+					"in_flight", inFlight,
+					"in_flight_high_water", maxInFlight,
+					"consecutive_failures", consecutiveFails,
+					"reconnects_total", reconnects)
 			}
 			lastReconnects = reconnects
 		}

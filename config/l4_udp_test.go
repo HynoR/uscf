@@ -64,13 +64,78 @@ func TestNormalizeSocksConfigL4HalfOpenTimeout(t *testing.T) {
 		t.Fatalf("zero L4HalfOpenTimeout -> %v, want default %v", got.L4HalfOpenTimeout.Duration(), DefaultL4HalfOpenTimeout)
 	}
 
-	cfg.L4HalfOpenTimeout = Duration(90 * time.Second)
+	// In-range (and <= the 60s idle default, so the half-open<=idle clamp leaves it alone).
+	cfg.L4HalfOpenTimeout = Duration(45 * time.Second)
 	got, err = NormalizeSocksConfig(cfg)
 	if err != nil {
 		t.Fatalf("NormalizeSocksConfig: %v", err)
 	}
-	if got.L4HalfOpenTimeout.Duration() != 90*time.Second {
-		t.Fatalf("in-range L4HalfOpenTimeout = %v, want 90s", got.L4HalfOpenTimeout.Duration())
+	if got.L4HalfOpenTimeout.Duration() != 45*time.Second {
+		t.Fatalf("in-range L4HalfOpenTimeout = %v, want 45s", got.L4HalfOpenTimeout.Duration())
+	}
+}
+
+// TestNormalizeSocksConfigL4MaxConnFailures verifies the configurable wedge-detector count
+// threshold defaults to 50 when unset/non-positive and is otherwise preserved (so it can be
+// tuned for experimentation).
+func TestNormalizeSocksConfigL4MaxConnFailures(t *testing.T) {
+	base := GetDefaultSocksConfig()
+	if DefaultL4MaxConnFailures != 50 {
+		t.Fatalf("DefaultL4MaxConnFailures = %d, want 50", DefaultL4MaxConnFailures)
+	}
+	if base.L4MaxConnFailures != DefaultL4MaxConnFailures {
+		t.Fatalf("default L4MaxConnFailures = %d, want %d", base.L4MaxConnFailures, DefaultL4MaxConnFailures)
+	}
+
+	for _, in := range []int{0, -7} {
+		cfg := base
+		cfg.L4MaxConnFailures = in
+		got, err := NormalizeSocksConfig(cfg)
+		if err != nil {
+			t.Fatalf("NormalizeSocksConfig(l4_max_conn_failures=%d): %v", in, err)
+		}
+		if got.L4MaxConnFailures != DefaultL4MaxConnFailures {
+			t.Fatalf("l4_max_conn_failures=%d -> %d, want default %d", in, got.L4MaxConnFailures, DefaultL4MaxConnFailures)
+		}
+	}
+
+	cfg := base
+	cfg.L4MaxConnFailures = 25 // a tuned-down experimental value is preserved
+	got, err := NormalizeSocksConfig(cfg)
+	if err != nil {
+		t.Fatalf("NormalizeSocksConfig: %v", err)
+	}
+	if got.L4MaxConnFailures != 25 {
+		t.Fatalf("in-range L4MaxConnFailures = %d, want 25", got.L4MaxConnFailures)
+	}
+}
+
+// TestNormalizeSocksConfigL4HalfOpenClampedToIdle proves the half-open reaper stays a
+// SHORTENER: a half-open timeout larger than the idle timeout is clamped down so it can
+// never extend the surviving direction's idle past a fully-open flow.
+func TestNormalizeSocksConfigL4HalfOpenClampedToIdle(t *testing.T) {
+	base := GetDefaultSocksConfig()
+	cfg := base
+	cfg.L4IdleTimeout = Duration(60 * time.Second)
+	cfg.L4HalfOpenTimeout = Duration(120 * time.Second) // larger than idle -> must clamp
+	got, err := NormalizeSocksConfig(cfg)
+	if err != nil {
+		t.Fatalf("NormalizeSocksConfig: %v", err)
+	}
+	if got.L4HalfOpenTimeout.Duration() != 60*time.Second {
+		t.Fatalf("half-open %v exceeding idle 60s -> %v, want clamped to 60s", 120*time.Second, got.L4HalfOpenTimeout.Duration())
+	}
+
+	// Half-open <= idle is preserved untouched.
+	cfg = base
+	cfg.L4IdleTimeout = Duration(60 * time.Second)
+	cfg.L4HalfOpenTimeout = Duration(20 * time.Second)
+	got, err = NormalizeSocksConfig(cfg)
+	if err != nil {
+		t.Fatalf("NormalizeSocksConfig: %v", err)
+	}
+	if got.L4HalfOpenTimeout.Duration() != 20*time.Second {
+		t.Fatalf("half-open 20s below idle 60s -> %v, want preserved 20s", got.L4HalfOpenTimeout.Duration())
 	}
 }
 

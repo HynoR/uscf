@@ -346,8 +346,10 @@ func TestL4ProxyRebuildsOnConsecutiveConnFailures(t *testing.T) {
 	p.mu.Unlock()
 	ctx := context.Background()
 
-	// Just under the threshold: no rebuild yet, connection still cached.
-	for i := 0; i < l4MaxConsecutiveConnFailures-1; i++ {
+	// Just under the threshold: no rebuild yet, connection still cached. The loop runs in
+	// microseconds, far under 2×connectTimeout, so the elapsed-time trip cannot fire here —
+	// this isolates the count trip.
+	for i := 0; i < int(p.maxConsecutiveFails)-1; i++ {
 		p.noteConnFailure(cc, ctx)
 	}
 	if _, rc := p.Stats(); rc != 0 {
@@ -374,6 +376,48 @@ func TestL4ProxyRebuildsOnConsecutiveConnFailures(t *testing.T) {
 	if p.consecutiveFails.Load() != 0 {
 		t.Fatalf("consecutiveFails = %d after rebuild, want 0 (reset)", p.consecutiveFails.Load())
 	}
+	if p.firstFailNanos.Load() != 0 {
+		t.Fatalf("firstFailNanos = %d after rebuild, want 0 (run reset)", p.firstFailNanos.Load())
+	}
+}
+
+// TestL4ProxyRebuildsOnWedgeElapsed proves the elapsed-time wedge trip: under low concurrency
+// the count threshold alone would need ~maxConsecutiveFails serial connect-timeout windows to
+// fire (minutes to ~an hour of 假死), so a no-answer run older than 2×connectTimeout rebuilds
+// well before the count is reached.
+func TestL4ProxyRebuildsOnWedgeElapsed(t *testing.T) {
+	p := newTestL4Proxy(t)
+	cc := &http3.ClientConn{}
+	p.mu.Lock()
+	p.clientConn = cc
+	p.mu.Unlock()
+	ctx := context.Background()
+
+	// First failure starts the run (stamps firstFailNanos); far below the count threshold.
+	p.noteConnFailure(cc, ctx)
+	if _, rc := p.Stats(); rc != 0 {
+		t.Fatalf("reconnects = %d after one failure, want 0", rc)
+	}
+	// Back-date the run to older than 2×connectTimeout so the next failure trips on elapsed
+	// time, not count.
+	p.firstFailNanos.Store(time.Now().Add(-2*p.connectTimeout - time.Second).UnixNano())
+
+	p.noteConnFailure(cc, ctx)
+	if got := p.consecutiveFails.Load(); got >= p.maxConsecutiveFails {
+		t.Fatalf("elapsed trip should fire BELOW the count threshold; consecutiveFails=%d threshold=%d", got, p.maxConsecutiveFails)
+	}
+	if _, rc := p.Stats(); rc != 1 {
+		t.Fatalf("reconnects = %d, want 1 (elapsed-time wedge trip)", rc)
+	}
+	p.mu.Lock()
+	cleared := p.clientConn == nil
+	p.mu.Unlock()
+	if !cleared {
+		t.Fatal("elapsed wedge trip must clear the cached connection")
+	}
+	if p.consecutiveFails.Load() != 0 || p.firstFailNanos.Load() != 0 {
+		t.Fatalf("run not reset after rebuild: consecutiveFails=%d firstFailNanos=%d", p.consecutiveFails.Load(), p.firstFailNanos.Load())
+	}
 }
 
 // TestL4ProxyConnFailureIgnoresStaleAndCancelled verifies the two guards: a failure on an
@@ -389,7 +433,7 @@ func TestL4ProxyConnFailureIgnoresStaleAndCancelled(t *testing.T) {
 
 	// Failures attributed to a DIFFERENT (already-replaced) connection are ignored.
 	stale := &http3.ClientConn{}
-	for i := 0; i < l4MaxConsecutiveConnFailures*2; i++ {
+	for i := 0; i < int(p.maxConsecutiveFails)*2; i++ {
 		p.noteConnFailure(stale, context.Background())
 	}
 	if got := p.consecutiveFails.Load(); got != 0 {
@@ -402,7 +446,7 @@ func TestL4ProxyConnFailureIgnoresStaleAndCancelled(t *testing.T) {
 	// Caller-cancelled dials are ignored.
 	cancelledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
-	for i := 0; i < l4MaxConsecutiveConnFailures*2; i++ {
+	for i := 0; i < int(p.maxConsecutiveFails)*2; i++ {
 		p.noteConnFailure(cc, cancelledCtx)
 	}
 	if got := p.consecutiveFails.Load(); got != 0 {
