@@ -140,12 +140,12 @@ type SocksConfig struct {
 	ReconnectDelay       Duration `json:"reconnect_delay"`        // 重连尝试之间的延迟
 	MaxReconnectAttempts int      `json:"max_reconnect_attempts"` // 连续连接失败阈值；达到后暂停重连等待人工处理，0表示无限重试
 	DrainGrace           Duration `json:"drain_grace"`            // 隧道断开后保留现有SOCKS连接的宽限期，超时仍未恢复则关闭
-	ConnectionTimeout    Duration `json:"connection_timeout"`     // 建立连接的超时时间
-	IdleTimeout          Duration `json:"idle_timeout"`           // 空闲连接的超时时间
+	ConnectionTimeout    Duration `json:"connection_timeout"`     // 建立连接的超时时间(L3/SSH-SOCKS/WG;L4用l4_connection_timeout,两套协议互不影响)
+	IdleTimeout          Duration `json:"idle_timeout"`           // 空闲连接的超时时间(L3/SSH-SOCKS/WG;L4用l4_idle_timeout,两套协议互不影响)
 	AlwaysReconnect      bool     `json:"always_reconnect"`       // true=断线后立即重连；false(默认)=隧道空闲被服务端清掉后，等到有出站流量再重连
-	L4PoolSize           int      `json:"l4_pool_size"`           // L4模式共享QUIC连接数;默认1(单连接=单一稳定WARP出口IP)。CF按账号限制并发连接(多余会被回收到~1-3),且每条连接出口IP不同,连接池会让出口IP抖动且无真实增益;不要为了"扩容"而调大。并发流上限由l4_max_streams处理
 	L4HalfOpenTimeout    Duration `json:"l4_half_open_timeout"`   // L4模式半开TCP流的空闲上限:一方向结束后另一方向最多空闲多久就回收(随活动重置),避免滞留流占满共享连接的MAX_STREAMS;<=0取默认
-	L4MaxStreams         int      `json:"l4_max_streams"`         // L4模式并发在途CONNECT流硬上限;达到后新拨号立即快速失败(客户端重试)而非阻塞堆积致OOM;<=0取默认。持续打满说明单账号扛不住该并发(考虑L3或分流)
+	L4ConnectionTimeout  Duration `json:"l4_connection_timeout"`  // L4模式建立连接/打开流的超时(与L3的connection_timeout隔离);<=0取默认
+	L4IdleTimeout        Duration `json:"l4_idle_timeout"`        // L4模式空闲流的超时(与L3的idle_timeout隔离)。L4每条空闲流占用稀缺的QUIC MAX_STREAMS额度,故默认显著短于L3;<=0取默认
 }
 
 // L4 UDP handling modes (socks.l4_udp). The L4 transport has no UDP path of its
@@ -176,32 +176,26 @@ const (
 // fails new flows the instant the connection is saturated (so nothing blocks or
 // piles up to OOM); and the connection auto-reconnects when it dies.
 const (
-	// DefaultL4PoolSize is how many shared QUIC connections the L4 proxy keeps.
-	// Default 1: a single connection is one stable WARP egress identity. A larger
-	// pool does NOT scale throughput here — Cloudflare caps concurrent QUIC
-	// connections per enrollment (extras are reaped down to ~1-3) and every
-	// connection is a *different* egress IP, so a pool fragments the egress identity
-	// (flows hop IPs) for no real headroom. Raise only if you understand and accept
-	// egress-IP churn. Per-connection MAX_STREAMS is handled by L4MaxStreams instead.
-	DefaultL4PoolSize = 1
-	// MaxL4PoolSize caps the pool to bound memory (each connection holds its own
-	// receive windows) against a misconfiguration.
-	MaxL4PoolSize = 64
 	// DefaultL4HalfOpenTimeout bounds how long a half-open L4 TCP relay's surviving
 	// direction may stay idle before it is reaped (re-arming on activity), instead
 	// of pinning its QUIC stream for the full idle timeout.
 	DefaultL4HalfOpenTimeout = 30 * time.Second
-	// DefaultL4MaxStreams is the hard ceiling on concurrent in-flight L4 CONNECT
-	// streams. When reached, a new dial fails fast (the client retries) instead of
-	// blocking on the shared connection's MAX_STREAMS and piling inbound SOCKS
-	// connections up into an OOM. It is sized comfortably above typical peak active
-	// concurrency; persistent saturation at this cap is the signal that one
-	// enrollment cannot carry the load (consider L3 or a spill path). <=0 uses this
-	// default; raise it (toward MaxL4MaxStreams) to effectively disable the cap.
-	DefaultL4MaxStreams = 4096
-	// MaxL4MaxStreams bounds the configurable cap so a typo cannot remove the OOM
-	// guard entirely.
-	MaxL4MaxStreams = 65536
+	// DefaultL4ConnectionTimeout is L4 mode's connect/stream-open timeout, a SEPARATE
+	// knob from the L3 connection_timeout so the two transports tune independently. The
+	// reference MASQUE L4 implementations (mihomo, usque) do not pin an explicit dial
+	// timeout (they use the caller's context), so this keeps the conventional 30s.
+	DefaultL4ConnectionTimeout = 30 * time.Second
+	// DefaultL4IdleTimeout is L4 mode's idle-stream timeout, kept SEPARATE from the L3
+	// idle_timeout (which stays 5m for the cheap-netstack-conn L3 path). The value is
+	// taken from the reference MASQUE L4 implementations rather than reused from L3: usque
+	// uses no TCP-stream idle reaper and a 60s data-path (UDP) timeout, and mihomo relies
+	// on quic-go's ~30s connection idle plus a 30s keepalive (so a stream lives only as
+	// long as the connection). uscf keeps its 30s half-open reaper (l4_half_open_timeout)
+	// for the common one-sided case and sets this both-directions-idle baseline to 60s,
+	// matching usque's data-path timeout — bounding idle streams against the shared
+	// connection's scarce MAX_STREAMS budget. A re-arming activity check means an actively
+	// transferring flow is never cut; only a truly idle one is reaped.
+	DefaultL4IdleTimeout = 60 * time.Second
 )
 
 // SSHSocksConfig 包含SSH SOCKS5网关相关的配置
@@ -423,9 +417,9 @@ func GetDefaultSocksConfig() SocksConfig {
 		ConnectionTimeout:    Duration(30 * time.Second),
 		IdleTimeout:          Duration(5 * time.Minute),
 		AlwaysReconnect:      false,
-		L4PoolSize:           DefaultL4PoolSize,
 		L4HalfOpenTimeout:    Duration(DefaultL4HalfOpenTimeout),
-		L4MaxStreams:         DefaultL4MaxStreams,
+		L4ConnectionTimeout:  Duration(DefaultL4ConnectionTimeout),
+		L4IdleTimeout:        Duration(DefaultL4IdleTimeout),
 	}
 }
 
@@ -507,20 +501,14 @@ func NormalizeSocksConfig(cfg SocksConfig) (SocksConfig, error) {
 	if normalized.DrainGrace.Duration() <= 0 {
 		normalized.DrainGrace = GetDefaultSocksConfig().DrainGrace
 	}
-	if normalized.L4PoolSize <= 0 {
-		normalized.L4PoolSize = DefaultL4PoolSize
-	}
-	if normalized.L4PoolSize > MaxL4PoolSize {
-		normalized.L4PoolSize = MaxL4PoolSize
-	}
 	if normalized.L4HalfOpenTimeout.Duration() <= 0 {
 		normalized.L4HalfOpenTimeout = Duration(DefaultL4HalfOpenTimeout)
 	}
-	if normalized.L4MaxStreams <= 0 {
-		normalized.L4MaxStreams = DefaultL4MaxStreams
+	if normalized.L4ConnectionTimeout.Duration() <= 0 {
+		normalized.L4ConnectionTimeout = Duration(DefaultL4ConnectionTimeout)
 	}
-	if normalized.L4MaxStreams > MaxL4MaxStreams {
-		normalized.L4MaxStreams = MaxL4MaxStreams
+	if normalized.L4IdleTimeout.Duration() <= 0 {
+		normalized.L4IdleTimeout = Duration(DefaultL4IdleTimeout)
 	}
 	switch strings.ToLower(strings.TrimSpace(normalized.L4UDP)) {
 	case "", L4UDPBlock:

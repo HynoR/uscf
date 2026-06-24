@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
 )
 
 // fakeL4Stream implements l4Stream and records the half-close calls.
@@ -74,6 +75,24 @@ func TestL4TCPConnCloseIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestL4TCPConnOnCloseReleasesOnce verifies the in-flight gauge is released exactly
+// once even when several teardown paths (relay end + drain) both close the conn, so
+// the live-stream counter cannot be double-decremented below zero.
+func TestL4TCPConnOnCloseReleasesOnce(t *testing.T) {
+	released := 0
+	c := &l4TCPConn{onClose: func() { released++ }}
+
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+	if released != 1 {
+		t.Fatalf("onClose ran %d times, want exactly 1", released)
+	}
+}
+
 func TestCloseL4StreamResetsBothDirections(t *testing.T) {
 	// dial-time error paths must reclaim BOTH halves of the request stream:
 	// http3.RequestStream.Close() only ends the send side, so without an explicit
@@ -106,31 +125,6 @@ func TestL4TCPConnNilStream(t *testing.T) {
 	}
 }
 
-func TestShouldReconnectOnOpenStreamError(t *testing.T) {
-	cancelled, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	cases := []struct {
-		name string
-		ctx  context.Context
-		err  error
-		want bool
-	}{
-		{"nil error", context.Background(), nil, false},
-		{"context canceled error", context.Background(), context.Canceled, false},
-		{"deadline exceeded error", context.Background(), context.DeadlineExceeded, false},
-		{"cancelled ctx", cancelled, errors.New("stream open failed"), false},
-		{"generic error", context.Background(), errors.New("PROTOCOL_VIOLATION"), true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := shouldReconnectOnOpenStreamError(tc.ctx, tc.err); got != tc.want {
-				t.Fatalf("shouldReconnectOnOpenStreamError = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
 func TestNewL4ProxyValidation(t *testing.T) {
 	if _, err := NewL4Proxy(L4ProxyConfig{}); err == nil {
 		t.Fatal("expected error when TLS config is missing")
@@ -146,12 +140,24 @@ func TestNewL4ProxyValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewL4Proxy: %v", err)
 	}
-	// Defaults are applied for non-positive timeout / retry count.
+	// Default connect timeout applied for non-positive value.
 	if p.connectTimeout != defaultL4ConnectTimeout {
 		t.Fatalf("connectTimeout = %v, want default %v", p.connectTimeout, defaultL4ConnectTimeout)
 	}
-	if p.connectRetryCount != defaultL4ConnectRetryCount {
-		t.Fatalf("connectRetryCount = %d, want default %d", p.connectRetryCount, defaultL4ConnectRetryCount)
+	// streamOpenTimeout defaults to 5s and is clamped to the (smaller) connect timeout.
+	if p.streamOpenTimeout != defaultL4StreamOpenTimeout {
+		t.Fatalf("streamOpenTimeout = %v, want %v", p.streamOpenTimeout, defaultL4StreamOpenTimeout)
+	}
+	p2, err := NewL4Proxy(L4ProxyConfig{
+		TLSConfig:      &tls.Config{},
+		Endpoint:       &net.UDPAddr{IP: net.IPv4(1, 1, 1, 1), Port: 443},
+		ConnectTimeout: 2 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewL4Proxy: %v", err)
+	}
+	if p2.streamOpenTimeout != 2*time.Second {
+		t.Fatalf("streamOpenTimeout = %v, want clamped to 2s", p2.streamOpenTimeout)
 	}
 }
 
@@ -233,42 +239,10 @@ func TestL4ProxyCloseIsSafe(t *testing.T) {
 	}
 }
 
-func TestNewL4ProxyPoolSize(t *testing.T) {
-	endpoint := &net.UDPAddr{IP: net.IPv4(1, 1, 1, 1), Port: 443}
-
-	// Default pool size when unset / non-positive.
-	p, err := NewL4Proxy(L4ProxyConfig{TLSConfig: &tls.Config{}, Endpoint: endpoint})
-	if err != nil {
-		t.Fatalf("NewL4Proxy: %v", err)
-	}
-	if len(p.clients) != defaultL4PoolSize {
-		t.Fatalf("default pool size = %d, want %d", len(p.clients), defaultL4PoolSize)
-	}
-
-	// Explicit pool size.
-	p2, err := NewL4Proxy(L4ProxyConfig{TLSConfig: &tls.Config{}, Endpoint: endpoint, PoolSize: 5})
-	if err != nil {
-		t.Fatalf("NewL4Proxy: %v", err)
-	}
-	if len(p2.clients) != 5 {
-		t.Fatalf("pool size = %d, want 5", len(p2.clients))
-	}
-
-	// streamOpenTimeout is clamped to the (smaller) connect timeout.
-	p3, err := NewL4Proxy(L4ProxyConfig{TLSConfig: &tls.Config{}, Endpoint: endpoint, ConnectTimeout: 2 * time.Second})
-	if err != nil {
-		t.Fatalf("NewL4Proxy: %v", err)
-	}
-	if p3.streamOpenTimeout != 2*time.Second {
-		t.Fatalf("streamOpenTimeout = %v, want clamped to 2s", p3.streamOpenTimeout)
-	}
-}
-
-func TestL4ProxyClosedRejectsNewConns(t *testing.T) {
+func TestL4ProxyClosedRejectsDial(t *testing.T) {
 	p, err := NewL4Proxy(L4ProxyConfig{
 		TLSConfig: &tls.Config{},
 		Endpoint:  &net.UDPAddr{IP: net.IPv4(1, 1, 1, 1), Port: 443},
-		PoolSize:  4,
 	})
 	if err != nil {
 		t.Fatalf("NewL4Proxy: %v", err)
@@ -277,32 +251,9 @@ func TestL4ProxyClosedRejectsNewConns(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 	// After Close, building a connection must fail fast with errL4ProxyClosed rather
-	// than dialing and storing into the pool (which would leak past Close).
-	if _, err := p.getOrCreateClientConnAt(context.Background(), 0); !errors.Is(err, errL4ProxyClosed) {
-		t.Fatalf("getOrCreateClientConnAt after Close = %v, want errL4ProxyClosed", err)
-	}
-}
-
-func TestL4ProxyClearSlotIfCurrent(t *testing.T) {
-	p := &L4Proxy{clients: make([]*l4HTTP3Client, 3)}
-	c := &l4HTTP3Client{} // nil conns: closeL4HTTP3 is nil-safe
-
-	p.clients[1] = c
-	// Mismatched client must not clear the slot.
-	p.clearSlotIfCurrent(1, &l4HTTP3Client{})
-	if p.clients[1] != c {
-		t.Fatal("clearSlotIfCurrent must not clear on a client mismatch")
-	}
-	// Matching client clears exactly that slot.
-	p.clearSlotIfCurrent(1, c)
-	if p.clients[1] != nil {
-		t.Fatal("clearSlotIfCurrent must clear the matching slot")
-	}
-	// Naming the wrong slot for a client must not clear a different slot.
-	p.clients[2] = c
-	p.clearSlotIfCurrent(0, c)
-	if p.clients[2] != c {
-		t.Fatal("clearSlotIfCurrent must only touch the named slot")
+	// than dialing and storing (which would leak past Close).
+	if _, err := p.dialConn(context.Background()); !errors.Is(err, errL4ProxyClosed) {
+		t.Fatalf("dialConn after Close = %v, want errL4ProxyClosed", err)
 	}
 }
 
@@ -320,117 +271,53 @@ func TestL4StatusError(t *testing.T) {
 	}
 }
 
-func TestL4ProxyConnHealthHelpersNilSafe(t *testing.T) {
-	p := &L4Proxy{clients: make([]*l4HTTP3Client, 2)}
-	// Both helpers must tolerate nil clients / nil QUIC connections / out-of-range
-	// slots without panicking (they run on dial error paths and as a goroutine).
-	p.dropConnIfDead(0, nil)
-	p.dropConnIfDead(0, &l4HTTP3Client{})
-	p.dropConnIfDead(99, &l4HTTP3Client{}) // out-of-range slot
-	p.watchClientConn(0, nil)
-	p.watchClientConn(0, &l4HTTP3Client{}) // nil quicConn returns immediately
-	p.clearSlotIfCurrent(0, &l4HTTP3Client{})
-	for _, c := range p.clients {
-		if c != nil {
-			t.Fatal("nil-safe helpers must not populate a slot")
-		}
-	}
-}
-
-func TestNewL4ProxyMaxInFlightDefault(t *testing.T) {
-	endpoint := &net.UDPAddr{IP: net.IPv4(1, 1, 1, 1), Port: 443}
-
-	p, err := NewL4Proxy(L4ProxyConfig{TLSConfig: &tls.Config{}, Endpoint: endpoint})
-	if err != nil {
-		t.Fatalf("NewL4Proxy: %v", err)
-	}
-	if p.maxInFlight != defaultL4MaxInFlightStreams {
-		t.Fatalf("default maxInFlight = %d, want %d", p.maxInFlight, defaultL4MaxInFlightStreams)
-	}
-
-	p2, err := NewL4Proxy(L4ProxyConfig{TLSConfig: &tls.Config{}, Endpoint: endpoint, MaxInFlightStreams: 10})
-	if err != nil {
-		t.Fatalf("NewL4Proxy: %v", err)
-	}
-	if p2.maxInFlight != 10 {
-		t.Fatalf("explicit maxInFlight = %d, want 10", p2.maxInFlight)
-	}
-}
-
-// TestL4ProxyDialFastFailsAtInFlightCap proves a dial at the in-flight ceiling
-// returns errL4PoolSaturated immediately — without attempting a (blocking) stream
-// open — and releases its reservation so the counter does not drift upward.
-func TestL4ProxyDialFastFailsAtInFlightCap(t *testing.T) {
+// TestL4ProxyCloseConnRebuildsOnce verifies closeConn is the rebuild primitive: it
+// clears the cached connection (so the next dial rebuilds) and bumps the reconnect
+// counter, but only when the stale connection it was handed still matches the cache —
+// a connection already rebuilt by another goroutine must not be torn down.
+func TestL4ProxyCloseConnRebuildsOnce(t *testing.T) {
 	p, err := NewL4Proxy(L4ProxyConfig{
-		TLSConfig:          &tls.Config{},
-		Endpoint:           &net.UDPAddr{IP: net.IPv4(1, 1, 1, 1), Port: 443},
-		MaxInFlightStreams: 2,
-	})
-	if err != nil {
-		t.Fatalf("NewL4Proxy: %v", err)
-	}
-	p.inFlight.Store(2) // pretend the cap is already reached
-
-	start := time.Now()
-	conn, err := p.DialContext(context.Background(), "1.1.1.1:443")
-	if !errors.Is(err, errL4PoolSaturated) {
-		t.Fatalf("DialContext at cap = (%v, %v), want errL4PoolSaturated", conn, err)
-	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Fatalf("saturated dial took %v; it must fast-fail without dialing", elapsed)
-	}
-	if got := p.inFlight.Load(); got != 2 {
-		t.Fatalf("inFlight = %d after fast-fail, want 2 (reservation released, not leaked)", got)
-	}
-	inFlight, rejected, _ := p.Stats()
-	if inFlight != 2 || rejected != 1 {
-		t.Fatalf("Stats() = (%d, %d), want (2, 1)", inFlight, rejected)
-	}
-}
-
-// TestL4ProxyNoteCeiling verifies the empirical MAX_STREAMS estimate keeps the
-// smallest blocking level seen (so it converges toward the true ceiling) and is
-// surfaced via Stats. It is observational only — it must not change the cap.
-func TestL4ProxyNoteCeiling(t *testing.T) {
-	p, err := NewL4Proxy(L4ProxyConfig{
-		TLSConfig:          &tls.Config{},
-		Endpoint:           &net.UDPAddr{IP: net.IPv4(1, 1, 1, 1), Port: 443},
-		MaxInFlightStreams: 4096,
+		TLSConfig: &tls.Config{},
+		Endpoint:  &net.UDPAddr{IP: net.IPv4(1, 1, 1, 1), Port: 443},
 	})
 	if err != nil {
 		t.Fatalf("NewL4Proxy: %v", err)
 	}
 
-	if _, _, ceiling := p.Stats(); ceiling != 0 {
-		t.Fatalf("initial observed ceiling = %d, want 0", ceiling)
+	// No cached connection: closeConn is a no-op and must not bump the counter.
+	p.closeConn(nil)
+	if _, rc := p.Stats(); rc != 0 {
+		t.Fatalf("reconnects = %d after no-op closeConn, want 0", rc)
 	}
-	p.noteCeiling(2000)
-	p.noteCeiling(2100) // higher: ignored, the tighter estimate wins
-	p.noteCeiling(1900) // lower: adopted
-	p.noteCeiling(0)    // invalid: ignored
-	if _, _, ceiling := p.Stats(); ceiling != 1900 {
-		t.Fatalf("observed ceiling = %d, want 1900 (min of observations)", ceiling)
-	}
-	// The configured cap is untouched (observation must not narrow capacity).
-	if p.maxInFlight != 4096 {
-		t.Fatalf("maxInFlight = %d, want 4096 (noteCeiling must not change the cap)", p.maxInFlight)
-	}
-}
 
-// TestL4TCPConnOnCloseReleasesOnce verifies the in-flight reservation is released
-// exactly once even when several teardown paths (relay end + drain) both close the
-// conn, so the live-stream counter cannot be double-decremented below zero.
-func TestL4TCPConnOnCloseReleasesOnce(t *testing.T) {
-	released := 0
-	c := &l4TCPConn{onClose: func() { released++ }}
+	// Install a fake cached connection (nil conns: closeL4HTTP3 is nil-safe).
+	cc := &http3.ClientConn{}
+	p.mu.Lock()
+	p.clientConn = cc
+	p.mu.Unlock()
 
-	if err := c.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
+	// A stale connection that does not match the cache must not clear it.
+	other := &http3.ClientConn{}
+	p.closeConn(other)
+	p.mu.Lock()
+	stillCached := p.clientConn == cc
+	p.mu.Unlock()
+	if !stillCached {
+		t.Fatal("closeConn must not tear down a connection that differs from the stale arg")
 	}
-	if err := c.Close(); err != nil {
-		t.Fatalf("second Close: %v", err)
+	if _, rc := p.Stats(); rc != 0 {
+		t.Fatalf("reconnects = %d after mismatched closeConn, want 0", rc)
 	}
-	if released != 1 {
-		t.Fatalf("onClose ran %d times, want exactly 1", released)
+
+	// Matching stale (and the nil "whatever is current" form) tears it down and rebuilds.
+	p.closeConn(cc)
+	p.mu.Lock()
+	cleared := p.clientConn == nil
+	p.mu.Unlock()
+	if !cleared {
+		t.Fatal("closeConn must clear the cached connection so the next dial rebuilds")
+	}
+	if _, rc := p.Stats(); rc != 1 {
+		t.Fatalf("reconnects = %d after teardown, want 1", rc)
 	}
 }

@@ -99,16 +99,14 @@ func setupAndRunL4Proxy(cmd *cobra.Command, overrides []string, configSaved bool
 		return err
 	}
 
-	connectionTimeout, idleTimeout := getTimeoutSettings(cmd)
+	connectionTimeout, idleTimeout := getL4TimeoutSettings()
 
 	l4Proxy, err := api.NewL4Proxy(api.L4ProxyConfig{
-		TLSConfig:          tlsConfig,
-		QUICConfig:         l4QUICConfig(config.AppConfig.Socks.KeepalivePeriod.Duration(), config.AppConfig.Socks.InitialPacketSize),
-		Endpoint:           endpoint,
-		EndpointSelector:   endpointSelector,
-		ConnectTimeout:     connectionTimeout,
-		PoolSize:           config.AppConfig.Socks.L4PoolSize,
-		MaxInFlightStreams: config.AppConfig.Socks.L4MaxStreams,
+		TLSConfig:        tlsConfig,
+		QUICConfig:       l4QUICConfig(config.AppConfig.Socks.KeepalivePeriod.Duration(), config.AppConfig.Socks.InitialPacketSize),
+		Endpoint:         endpoint,
+		EndpointSelector: endpointSelector,
+		ConnectTimeout:   connectionTimeout,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create L4 proxy: %w", err)
@@ -229,26 +227,45 @@ func l4QUICConfig(keepalivePeriod time.Duration, initialPacketSize uint16) *quic
 	}
 }
 
-// logL4Stats periodically logs the L4 proxy's live stream count and cumulative
-// fast-fail rejections. It logs at debug normally and bumps to info on any interval
-// where saturation occurred (the actionable case), so an operator sees the ceiling
-// being hit without enabling debug. Returns when ctx is cancelled.
+// getL4TimeoutSettings returns L4 mode's connect and idle timeouts, read from the
+// dedicated l4_connection_timeout / l4_idle_timeout config so L4 is tuned in complete
+// isolation from L3. The two transports have different cost models: an idle L3 flow is
+// a cheap netstack connection, but an idle L4 flow pins a scarce QUIC stream against the
+// shared connection's MAX_STREAMS budget, so the L4 idle default is much shorter.
+// Normalize guarantees positive values; the fallbacks keep this safe on a raw config.
+func getL4TimeoutSettings() (time.Duration, time.Duration) {
+	connectionTimeout := config.AppConfig.Socks.L4ConnectionTimeout.Duration()
+	idleTimeout := config.AppConfig.Socks.L4IdleTimeout.Duration()
+	if connectionTimeout <= 0 {
+		connectionTimeout = config.DefaultL4ConnectionTimeout
+	}
+	if idleTimeout <= 0 {
+		idleTimeout = config.DefaultL4IdleTimeout
+	}
+	return connectionTimeout, idleTimeout
+}
+
+// logL4Stats periodically logs the L4 proxy's live stream count and the cumulative
+// number of shared-connection rebuilds. It logs at debug normally and bumps to info on
+// any interval where the connection was rebuilt (the actionable case: the shared
+// connection died or hit the peer's MAX_STREAMS and self-healed), so an operator sees
+// reconnects without enabling debug. Returns when ctx is cancelled.
 func logL4Stats(ctx context.Context, l4Proxy *api.L4Proxy) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
-	var lastRejected uint64
+	var lastReconnects uint64
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			inFlight, rejected, ceiling := l4Proxy.Stats()
-			if rejected > lastRejected {
-				slog.Info("l4 stream stats", "in_flight", inFlight, "observed_stream_ceiling", ceiling, "rejected_total", rejected, "rejected_interval", rejected-lastRejected)
+			inFlight, reconnects := l4Proxy.Stats()
+			if reconnects > lastReconnects {
+				slog.Info("l4 stream stats", "in_flight", inFlight, "reconnects_total", reconnects, "reconnects_interval", reconnects-lastReconnects)
 			} else {
-				slog.Debug("l4 stream stats", "in_flight", inFlight, "observed_stream_ceiling", ceiling, "rejected_total", rejected)
+				slog.Debug("l4 stream stats", "in_flight", inFlight, "reconnects_total", reconnects)
 			}
-			lastRejected = rejected
+			lastReconnects = reconnects
 		}
 	}
 }
@@ -264,10 +281,7 @@ func prepareL4SocksRuntime(l4Proxy *api.L4Proxy, udpTunnel *l3UDPTunnel, connect
 		return nil, socksRuntimeMeta{}, err
 	}
 	bypassMatcher := routePolicy.bypassMatcher
-	meta := socksRuntimeMeta{
-		l4PoolSize:   config.AppConfig.Socks.L4PoolSize,
-		l4MaxStreams: config.AppConfig.Socks.L4MaxStreams,
-	}
+	meta := socksRuntimeMeta{}
 	if routePolicy.ProxyTCPPortsEnabled() {
 		meta.proxyTCPPorts = len(routePolicy.proxyTCPPortList)
 	} else if bypassMatcher.Enabled() {

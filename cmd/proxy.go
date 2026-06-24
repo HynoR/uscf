@@ -947,8 +947,6 @@ type socksRuntimeMeta struct {
 	proxyTCPPorts int
 	blockUDP443   bool
 	udpMode       string // L4 UDP disposition ("block"/"direct"); empty outside L4
-	l4PoolSize    int    // L4 shared-connection pool size; 0 outside L4
-	l4MaxStreams  int    // L4 in-flight stream fast-fail cap; 0 outside L4
 }
 
 type proxyReadyInfo struct {
@@ -1371,12 +1369,6 @@ func logProxyReady(listenerAddr net.Addr, idleTimeout time.Duration, info proxyR
 	}
 	if info.meta.udpMode != "" {
 		attrs = append(attrs, "l4_udp", info.meta.udpMode)
-	}
-	if info.meta.l4PoolSize > 0 {
-		attrs = append(attrs, "l4_pool", info.meta.l4PoolSize)
-	}
-	if info.meta.l4MaxStreams > 0 {
-		attrs = append(attrs, "l4_max_streams", info.meta.l4MaxStreams)
 	}
 	if info.meta.bypassDomains > 0 {
 		attrs = append(attrs, "bypass_domains", info.meta.bypassDomains)

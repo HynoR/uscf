@@ -4,10 +4,11 @@ package api
 //
 //	RUN_CF_UDP_PROBE=1 go test ./api -run TestL4ProxyRecoversAfterConnDeath -v -count=1
 //
-// Reproduces the reported failure: after the shared QUIC connection dies, the
-// cached (dead) connection used to linger — every new dial would block in
-// ReadResponse until timeout. This asserts that killing the shared connection
-// invalidates the cache (watchClientConn) and the next dial rebuilds quickly.
+// Reproduces the reported failure: after the shared QUIC connection dies, the cached
+// (dead) connection must not linger. In the mihomo model the recovery is lazy — the
+// next dial that fails to open a stream tears the dead connection down (closeConn) and
+// the dial after that rebuilds. This asserts that killing the shared connection leads
+// to a fresh connection (reconnect counter bumps) and dialing succeeds again quickly.
 
 import (
 	"context"
@@ -51,54 +52,54 @@ func TestL4ProxyRecoversAfterConnDeath(t *testing.T) {
 	}
 	_ = conn1.Close()
 
-	p.connMu.Lock()
-	dead := p.clients[0]
-	p.connMu.Unlock()
-	if dead == nil || dead.quicConn == nil {
+	p.mu.Lock()
+	deadQUIC := p.quicConn
+	p.mu.Unlock()
+	if deadQUIC == nil {
 		t.Fatalf("expected a cached shared connection after first dial")
+	}
+	if _, rc := p.Stats(); rc != 0 {
+		t.Fatalf("reconnects = %d before death, want 0", rc)
 	}
 
 	// 2. Simulate the connection dying (CF idle eviction / path failure).
-	_ = dead.quicConn.CloseWithError(quic.ApplicationErrorCode(0), "simulated death")
+	_ = deadQUIC.CloseWithError(quic.ApplicationErrorCode(0), "simulated death")
 
-	// 3. watchClientConn must evict the dead connection from the cache promptly.
-	deadline := time.Now().Add(5 * time.Second)
+	// 3. Subsequent dials must rebuild and succeed quickly — NOT hang on the dead
+	//    connection. The first post-death dial may fail (it is the one that observes the
+	//    dead connection via OpenRequestStream and tears it down); the next rebuilds.
+	start := time.Now()
+	deadline := time.Now().Add(20 * time.Second)
+	var conn2 net.Conn
 	for {
-		p.connMu.Lock()
-		current := p.clients[0]
-		p.connMu.Unlock()
-		if current != dead {
-			break // evicted (nil) or already replaced
+		dialCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+		conn2, err = p.DialContext(dialCtx, "1.1.1.1:443")
+		cancel()
+		if err == nil {
+			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("watchClientConn did not invalidate the dead connection within 5s")
+			t.Fatalf("dial after conn death never recovered: %v", err)
 		}
-		time.Sleep(20 * time.Millisecond)
-	}
-
-	// 4. The next dial must rebuild and succeed quickly — NOT hang on the dead
-	//    connection. Bound it well under the old failure window.
-	start := time.Now()
-	dialCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
-	defer cancel()
-	conn2, err := p.DialContext(dialCtx, "1.1.1.1:443")
-	if err != nil {
-		t.Fatalf("dial after conn death failed (did not recover): %v", err)
+		time.Sleep(50 * time.Millisecond)
 	}
 	elapsed := time.Since(start)
 	_ = conn2.Close()
 
-	p.connMu.Lock()
-	rebuilt := p.clients[0]
-	p.connMu.Unlock()
-	if rebuilt == nil || rebuilt == dead {
+	p.mu.Lock()
+	rebuilt := p.quicConn
+	p.mu.Unlock()
+	if rebuilt == nil || rebuilt == deadQUIC {
 		t.Fatalf("expected a fresh shared connection after recovery")
 	}
-	t.Logf("VERDICT: L4 recovered after conn death; rebuild dial took %v", elapsed)
+	if _, rc := p.Stats(); rc < 1 {
+		t.Fatalf("reconnects = %d after recovery, want >= 1 (closeConn should have fired)", rc)
+	}
+	t.Logf("VERDICT: L4 recovered after conn death in %v; reconnects=%d", elapsed, func() uint64 { _, rc := p.Stats(); return rc }())
 }
 
-// enrollFreeWARPForL4 registers a throwaway free WARP account and returns a TLS
-// config + endpoint pinned to the L4 (MASQUE proxy) SNI.
+// enrollFreeWARPForL4 registers a throwaway free WARP account and returns a TLS config
+// + endpoint pinned to the L4 (MASQUE proxy) SNI.
 func enrollFreeWARPForL4(t *testing.T) (*tls.Config, *net.UDPAddr) {
 	t.Helper()
 	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
