@@ -336,3 +336,72 @@ func TestL4ProxyConnHealthHelpersNilSafe(t *testing.T) {
 		}
 	}
 }
+
+func TestNewL4ProxyMaxInFlightDefault(t *testing.T) {
+	endpoint := &net.UDPAddr{IP: net.IPv4(1, 1, 1, 1), Port: 443}
+
+	p, err := NewL4Proxy(L4ProxyConfig{TLSConfig: &tls.Config{}, Endpoint: endpoint})
+	if err != nil {
+		t.Fatalf("NewL4Proxy: %v", err)
+	}
+	if p.maxInFlight != defaultL4MaxInFlightStreams {
+		t.Fatalf("default maxInFlight = %d, want %d", p.maxInFlight, defaultL4MaxInFlightStreams)
+	}
+
+	p2, err := NewL4Proxy(L4ProxyConfig{TLSConfig: &tls.Config{}, Endpoint: endpoint, MaxInFlightStreams: 10})
+	if err != nil {
+		t.Fatalf("NewL4Proxy: %v", err)
+	}
+	if p2.maxInFlight != 10 {
+		t.Fatalf("explicit maxInFlight = %d, want 10", p2.maxInFlight)
+	}
+}
+
+// TestL4ProxyDialFastFailsAtInFlightCap proves a dial at the in-flight ceiling
+// returns errL4PoolSaturated immediately — without attempting a (blocking) stream
+// open — and releases its reservation so the counter does not drift upward.
+func TestL4ProxyDialFastFailsAtInFlightCap(t *testing.T) {
+	p, err := NewL4Proxy(L4ProxyConfig{
+		TLSConfig:          &tls.Config{},
+		Endpoint:           &net.UDPAddr{IP: net.IPv4(1, 1, 1, 1), Port: 443},
+		MaxInFlightStreams: 2,
+	})
+	if err != nil {
+		t.Fatalf("NewL4Proxy: %v", err)
+	}
+	p.inFlight.Store(2) // pretend the cap is already reached
+
+	start := time.Now()
+	conn, err := p.DialContext(context.Background(), "1.1.1.1:443")
+	if !errors.Is(err, errL4PoolSaturated) {
+		t.Fatalf("DialContext at cap = (%v, %v), want errL4PoolSaturated", conn, err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("saturated dial took %v; it must fast-fail without dialing", elapsed)
+	}
+	if got := p.inFlight.Load(); got != 2 {
+		t.Fatalf("inFlight = %d after fast-fail, want 2 (reservation released, not leaked)", got)
+	}
+	inFlight, rejected := p.Stats()
+	if inFlight != 2 || rejected != 1 {
+		t.Fatalf("Stats() = (%d, %d), want (2, 1)", inFlight, rejected)
+	}
+}
+
+// TestL4TCPConnOnCloseReleasesOnce verifies the in-flight reservation is released
+// exactly once even when several teardown paths (relay end + drain) both close the
+// conn, so the live-stream counter cannot be double-decremented below zero.
+func TestL4TCPConnOnCloseReleasesOnce(t *testing.T) {
+	released := 0
+	c := &l4TCPConn{onClose: func() { released++ }}
+
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+	if released != 1 {
+		t.Fatalf("onClose ran %d times, want exactly 1", released)
+	}
+}

@@ -33,6 +33,10 @@ const (
 	defaultL4ConnectTimeout    = 15 * time.Second
 	defaultL4ConnectRetryCount = 2
 	defaultL4PoolSize          = 1
+	// defaultL4MaxInFlightStreams bounds concurrent open CONNECT streams when the
+	// caller does not specify one. Sized well above typical peak active concurrency;
+	// it is an OOM backstop, not the normal operating limit.
+	defaultL4MaxInFlightStreams = 4096
 	// defaultL4StreamOpenTimeout bounds a single OpenRequestStream attempt so a
 	// saturated connection (peer MAX_STREAMS reached → OpenStreamSync blocks) is
 	// detected quickly and the dial can fall through to another pooled connection
@@ -56,17 +60,31 @@ type L4ProxyConfig struct {
 	ConnectTimeout time.Duration
 	// ConnectRetryCount is how many times DialContext retries opening a stream.
 	ConnectRetryCount int
-	// PoolSize is how many shared QUIC connections to spread streams across, so
-	// concurrent streams are not bounded by one connection's MAX_STREAMS. <=0 uses
-	// the default.
+	// PoolSize is how many shared QUIC connections to keep. Default 1: a single
+	// connection is one stable WARP egress identity. A larger pool does not scale
+	// throughput (Cloudflare caps connections per enrollment and each connection is a
+	// different egress IP), so it is an opt-in that trades egress-IP stability for
+	// per-connection MAX_STREAMS headroom. <=0 uses the default.
 	PoolSize int
+	// MaxInFlightStreams hard-caps concurrent open CONNECT streams across the whole
+	// proxy. When reached, DialContext fails fast with errL4PoolSaturated (the client
+	// retries) instead of blocking on the shared connection's MAX_STREAMS — which is
+	// what otherwise lets inbound SOCKS connections pile up into an OOM. It also
+	// bounds how many dials can be concurrently blocked in OpenRequestStream. <=0 uses
+	// the default.
+	MaxInFlightStreams int
 }
 
-// L4Proxy opens one HTTP/3 CONNECT stream for each proxied TCP connection,
-// multiplexed over a small pool of cached QUIC connections. A pool (rather than a
-// single shared connection) lets concurrent stream count exceed one connection's
-// peer-imposed MAX_STREAMS, and isolates a dead/saturated connection to its own
-// slot so other flows keep working.
+// L4Proxy opens one HTTP/3 CONNECT stream per proxied TCP connection, multiplexed
+// over a single shared QUIC connection (PoolSize defaults to 1). The connection is
+// one stable WARP egress identity; it auto-reconnects when it dies. The two ways a
+// shared connection breaks under load are handled explicitly: half-open streams are
+// reclaimed quickly upstream (so the peer keeps raising MAX_STREAMS), and a hard
+// in-flight stream cap fast-fails new flows the instant the connection is saturated,
+// so a dial never blocks on OpenStreamSync and inbound SOCKS connections cannot pile
+// up into an OOM. PoolSize>1 keeps the same machinery across N connections, but at
+// the cost of fragmenting the egress IP — it is not the scaling axis (Cloudflare
+// caps connections per enrollment).
 type L4Proxy struct {
 	tlsConfig         *tls.Config
 	quicConfig        *quic.Config
@@ -75,7 +93,12 @@ type L4Proxy struct {
 	connectTimeout    time.Duration
 	connectRetryCount int
 	streamOpenTimeout time.Duration
-	poolSize          int // immutable; == len(clients). Read locklessly in DialContext.
+	poolSize          int   // immutable; == len(clients). Read locklessly in DialContext.
+	maxInFlight       int64 // immutable; hard ceiling on concurrent open streams (0 = unbounded).
+
+	inFlight     atomic.Int64  // currently open CONNECT streams (reserved at dial, released on Close)
+	saturations  atomic.Uint64 // cumulative fast-fail rejections at the in-flight cap
+	lastSatLogNs atomic.Int64  // unix ns of the last saturation warning (rate-limits the log)
 
 	connMu  sync.Mutex
 	closed  bool             // set by Close; blocks a racing in-flight dial from storing
@@ -115,6 +138,9 @@ func NewL4Proxy(cfg L4ProxyConfig) (*L4Proxy, error) {
 	if cfg.PoolSize <= 0 {
 		cfg.PoolSize = defaultL4PoolSize
 	}
+	if cfg.MaxInFlightStreams <= 0 {
+		cfg.MaxInFlightStreams = defaultL4MaxInFlightStreams
+	}
 	// Bound a single stream-open attempt so a saturated connection is detected fast,
 	// and ensure the whole pool can be swept within one connect timeout under
 	// saturation (poolSize * streamOpenTimeout <= connectTimeout), with a 1s floor so
@@ -139,6 +165,7 @@ func NewL4Proxy(cfg L4ProxyConfig) (*L4Proxy, error) {
 		connectRetryCount: cfg.ConnectRetryCount,
 		streamOpenTimeout: streamOpenTimeout,
 		poolSize:          cfg.PoolSize,
+		maxInFlight:       int64(cfg.MaxInFlightStreams),
 		clients:           make([]*l4HTTP3Client, cfg.PoolSize),
 	}, nil
 }
@@ -171,11 +198,16 @@ func (p *L4Proxy) Close() error {
 	return nil
 }
 
-// DialContext connects target (an "ip:port" authority) over an L4 MASQUE
-// HTTP/3 CONNECT stream and returns it as a net.Conn. It sweeps the connection
-// pool (round-robin), so a saturated (MAX_STREAMS-reached) or transiently failing
-// connection is skipped in favour of another pooled connection, all within one
-// connect timeout.
+// DialContext connects target (an "ip:port" authority) over an L4 MASQUE HTTP/3
+// CONNECT stream and returns it as a net.Conn.
+//
+// Before doing any work it reserves an in-flight stream slot: if the proxy is
+// already at MaxInFlightStreams it returns errL4PoolSaturated immediately, so a
+// saturated shared connection sheds load fast (the client retries) instead of
+// blocking on OpenStreamSync and letting inbound SOCKS connections accumulate into
+// an OOM. The reservation is released here on any dial failure, or when the returned
+// conn is closed (l4TCPConn.onClose). It also bounds how many dials may be blocked
+// concurrently in OpenRequestStream, since each holds a slot until it returns.
 func (p *L4Proxy) DialContext(ctx context.Context, target string) (net.Conn, error) {
 	if p == nil || p.tlsConfig == nil {
 		return nil, fmt.Errorf("missing TLS config")
@@ -184,6 +216,32 @@ func (p *L4Proxy) DialContext(ctx context.Context, target string) (net.Conn, err
 		return nil, fmt.Errorf("missing HTTP/3 UDP endpoint")
 	}
 
+	if p.maxInFlight > 0 {
+		if p.inFlight.Add(1) > p.maxInFlight {
+			p.inFlight.Add(-1)
+			p.recordSaturation()
+			return nil, errL4PoolSaturated
+		}
+	}
+
+	conn, err := p.dialSweep(ctx, target)
+	if err != nil {
+		if p.maxInFlight > 0 {
+			p.inFlight.Add(-1)
+		}
+		return nil, err
+	}
+	if p.maxInFlight > 0 {
+		conn.onClose = func() { p.inFlight.Add(-1) }
+	}
+	return conn, nil
+}
+
+// dialSweep sweeps the connection pool (round-robin) within one connect timeout, so
+// a saturated (MAX_STREAMS-reached) or transiently failing connection is skipped in
+// favour of another pooled connection. With the default PoolSize of 1 it is a single
+// attempt on the one shared connection.
+func (p *L4Proxy) dialSweep(ctx context.Context, target string) (*l4TCPConn, error) {
 	timeout := p.connectTimeout
 	if timeout <= 0 {
 		timeout = defaultL4ConnectTimeout
@@ -225,6 +283,25 @@ func (p *L4Proxy) DialContext(ctx context.Context, target string) (net.Conn, err
 		lastErr = fmt.Errorf("l4 dial to %s failed", target)
 	}
 	return nil, lastErr
+}
+
+// recordSaturation counts a fast-fail rejection and warns at most once every 5s so a
+// sustained saturation storm cannot flood the log. A persistent stream of these is
+// the operator's signal that one enrollment cannot carry the offered concurrency.
+func (p *L4Proxy) recordSaturation() {
+	n := p.saturations.Add(1)
+	now := time.Now().UnixNano()
+	last := p.lastSatLogNs.Load()
+	if now-last > int64(5*time.Second) && p.lastSatLogNs.CompareAndSwap(last, now) {
+		slog.Warn("l4 saturated: rejecting new flows fast (shared QUIC connection at MAX_STREAMS or local cap reached)",
+			"in_flight", p.inFlight.Load(), "max_streams", p.maxInFlight, "rejected_total", n)
+	}
+}
+
+// Stats reports the current open-stream count and the cumulative number of dials
+// fast-failed at the in-flight cap, for periodic observability.
+func (p *L4Proxy) Stats() (inFlight int64, rejected uint64) {
+	return p.inFlight.Load(), p.saturations.Load()
 }
 
 // l4StatusError is a per-target CONNECT rejection (valid non-2xx response). The
@@ -460,10 +537,11 @@ func closeL4Stream(stream l4Stream) {
 // l4TCPConn adapts an HTTP/3 CONNECT request stream to net.Conn, preserving TCP
 // half-close semantics (CloseWrite ends our send side; CloseRead cancels recv).
 type l4TCPConn struct {
-	stream l4Stream
-	local  net.Addr
-	remote net.Addr
-	once   sync.Once
+	stream  l4Stream
+	local   net.Addr
+	remote  net.Addr
+	once    sync.Once
+	onClose func() // releases the proxy's in-flight reservation; runs once on Close
 }
 
 type l4Stream interface {
@@ -508,6 +586,9 @@ func (c *l4TCPConn) Close() error {
 	c.once.Do(func() {
 		err = c.CloseWrite()
 		_ = c.CloseRead()
+		if c.onClose != nil {
+			c.onClose()
+		}
 	})
 	return err
 }

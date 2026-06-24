@@ -102,17 +102,25 @@ func setupAndRunL4Proxy(cmd *cobra.Command, overrides []string, configSaved bool
 	connectionTimeout, idleTimeout := getTimeoutSettings(cmd)
 
 	l4Proxy, err := api.NewL4Proxy(api.L4ProxyConfig{
-		TLSConfig:        tlsConfig,
-		QUICConfig:       l4QUICConfig(config.AppConfig.Socks.KeepalivePeriod.Duration(), config.AppConfig.Socks.InitialPacketSize),
-		Endpoint:         endpoint,
-		EndpointSelector: endpointSelector,
-		ConnectTimeout:   connectionTimeout,
-		PoolSize:         config.AppConfig.Socks.L4PoolSize,
+		TLSConfig:          tlsConfig,
+		QUICConfig:         l4QUICConfig(config.AppConfig.Socks.KeepalivePeriod.Duration(), config.AppConfig.Socks.InitialPacketSize),
+		Endpoint:           endpoint,
+		EndpointSelector:   endpointSelector,
+		ConnectTimeout:     connectionTimeout,
+		PoolSize:           config.AppConfig.Socks.L4PoolSize,
+		MaxInFlightStreams: config.AppConfig.Socks.L4MaxStreams,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create L4 proxy: %w", err)
 	}
 	defer l4Proxy.Close()
+
+	// Periodically surface the live stream count and cumulative fast-fail rejections
+	// so an operator can see how close a single connection runs to its ceiling under
+	// load. Stops when the listener closes (runSocksServer returns).
+	statsCtx, stopStats := context.WithCancel(context.Background())
+	defer stopStats()
+	go logL4Stats(statsCtx, l4Proxy)
 
 	// "mix" mode: stand up a parallel, lazy L3 connect-ip tunnel that carries UDP
 	// while TCP rides L4. It does not connect until the first UDP datagram, so a
@@ -221,6 +229,30 @@ func l4QUICConfig(keepalivePeriod time.Duration, initialPacketSize uint16) *quic
 	}
 }
 
+// logL4Stats periodically logs the L4 proxy's live stream count and cumulative
+// fast-fail rejections. It logs at debug normally and bumps to info on any interval
+// where saturation occurred (the actionable case), so an operator sees the ceiling
+// being hit without enabling debug. Returns when ctx is cancelled.
+func logL4Stats(ctx context.Context, l4Proxy *api.L4Proxy) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	var lastRejected uint64
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			inFlight, rejected := l4Proxy.Stats()
+			if rejected > lastRejected {
+				slog.Info("l4 stream stats", "in_flight", inFlight, "rejected_total", rejected, "rejected_interval", rejected-lastRejected)
+			} else {
+				slog.Debug("l4 stream stats", "in_flight", inFlight, "rejected_total", rejected)
+			}
+			lastRejected = rejected
+		}
+	}
+}
+
 // prepareL4SocksRuntime builds the SOCKS runtime backed by the L4 proxy dialer.
 // Mirrors prepareSocksRuntime but: DNS is always local (no in-tunnel resolver),
 // the SOCKS server is CONNECT-only (TCP), and the upstream dialer routes through
@@ -232,7 +264,10 @@ func prepareL4SocksRuntime(l4Proxy *api.L4Proxy, udpTunnel *l3UDPTunnel, connect
 		return nil, socksRuntimeMeta{}, err
 	}
 	bypassMatcher := routePolicy.bypassMatcher
-	meta := socksRuntimeMeta{l4PoolSize: config.AppConfig.Socks.L4PoolSize}
+	meta := socksRuntimeMeta{
+		l4PoolSize:   config.AppConfig.Socks.L4PoolSize,
+		l4MaxStreams: config.AppConfig.Socks.L4MaxStreams,
+	}
 	if routePolicy.ProxyTCPPortsEnabled() {
 		meta.proxyTCPPorts = len(routePolicy.proxyTCPPortList)
 	} else if bypassMatcher.Enabled() {

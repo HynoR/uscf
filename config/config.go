@@ -143,8 +143,9 @@ type SocksConfig struct {
 	ConnectionTimeout    Duration `json:"connection_timeout"`     // 建立连接的超时时间
 	IdleTimeout          Duration `json:"idle_timeout"`           // 空闲连接的超时时间
 	AlwaysReconnect      bool     `json:"always_reconnect"`       // true=断线后立即重连；false(默认)=隧道空闲被服务端清掉后，等到有出站流量再重连
-	L4PoolSize           int      `json:"l4_pool_size"`           // L4模式共享QUIC连接池大小(并发流分摊到多条连接,绕过单连接MAX_STREAMS上限);<=0取默认
+	L4PoolSize           int      `json:"l4_pool_size"`           // L4模式共享QUIC连接数;默认1(单连接=单一稳定WARP出口IP)。CF按账号限制并发连接(多余会被回收到~1-3),且每条连接出口IP不同,连接池会让出口IP抖动且无真实增益;不要为了"扩容"而调大。并发流上限由l4_max_streams处理
 	L4HalfOpenTimeout    Duration `json:"l4_half_open_timeout"`   // L4模式半开TCP流的空闲上限:一方向结束后另一方向最多空闲多久就回收(随活动重置),避免滞留流占满共享连接的MAX_STREAMS;<=0取默认
+	L4MaxStreams         int      `json:"l4_max_streams"`         // L4模式并发在途CONNECT流硬上限;达到后新拨号立即快速失败(客户端重试)而非阻塞堆积致OOM;<=0取默认。持续打满说明单账号扛不住该并发(考虑L3或分流)
 }
 
 // L4 UDP handling modes (socks.l4_udp). The L4 transport has no UDP path of its
@@ -169,14 +170,20 @@ const (
 
 // L4 shared-connection scaling and stream-lifetime defaults. L4 multiplexes every
 // TCP flow as one QUIC stream over shared QUIC connection(s), so the live-stream
-// count is bounded by Cloudflare's per-connection MAX_STREAMS. A pool of
-// connections multiplies that ceiling for high concurrency, and a short half-open
-// idle keeps a finished flow from pinning its stream for the full idle timeout.
+// count is bounded by Cloudflare's per-connection MAX_STREAMS. Robustness comes
+// from three independent guards: a short half-open idle keeps a finished flow from
+// pinning its stream for the full idle timeout; a hard in-flight stream cap fast-
+// fails new flows the instant the connection is saturated (so nothing blocks or
+// piles up to OOM); and the connection auto-reconnects when it dies.
 const (
-	// DefaultL4PoolSize is how many shared QUIC connections the L4 proxy keeps, so
-	// concurrent streams are spread across them instead of saturating one
-	// connection's MAX_STREAMS. 8 comfortably covers thousands of concurrent flows.
-	DefaultL4PoolSize = 8
+	// DefaultL4PoolSize is how many shared QUIC connections the L4 proxy keeps.
+	// Default 1: a single connection is one stable WARP egress identity. A larger
+	// pool does NOT scale throughput here — Cloudflare caps concurrent QUIC
+	// connections per enrollment (extras are reaped down to ~1-3) and every
+	// connection is a *different* egress IP, so a pool fragments the egress identity
+	// (flows hop IPs) for no real headroom. Raise only if you understand and accept
+	// egress-IP churn. Per-connection MAX_STREAMS is handled by L4MaxStreams instead.
+	DefaultL4PoolSize = 1
 	// MaxL4PoolSize caps the pool to bound memory (each connection holds its own
 	// receive windows) against a misconfiguration.
 	MaxL4PoolSize = 64
@@ -184,6 +191,17 @@ const (
 	// direction may stay idle before it is reaped (re-arming on activity), instead
 	// of pinning its QUIC stream for the full idle timeout.
 	DefaultL4HalfOpenTimeout = 30 * time.Second
+	// DefaultL4MaxStreams is the hard ceiling on concurrent in-flight L4 CONNECT
+	// streams. When reached, a new dial fails fast (the client retries) instead of
+	// blocking on the shared connection's MAX_STREAMS and piling inbound SOCKS
+	// connections up into an OOM. It is sized comfortably above typical peak active
+	// concurrency; persistent saturation at this cap is the signal that one
+	// enrollment cannot carry the load (consider L3 or a spill path). <=0 uses this
+	// default; raise it (toward MaxL4MaxStreams) to effectively disable the cap.
+	DefaultL4MaxStreams = 4096
+	// MaxL4MaxStreams bounds the configurable cap so a typo cannot remove the OOM
+	// guard entirely.
+	MaxL4MaxStreams = 65536
 )
 
 // SSHSocksConfig 包含SSH SOCKS5网关相关的配置
@@ -407,6 +425,7 @@ func GetDefaultSocksConfig() SocksConfig {
 		AlwaysReconnect:      false,
 		L4PoolSize:           DefaultL4PoolSize,
 		L4HalfOpenTimeout:    Duration(DefaultL4HalfOpenTimeout),
+		L4MaxStreams:         DefaultL4MaxStreams,
 	}
 }
 
@@ -496,6 +515,12 @@ func NormalizeSocksConfig(cfg SocksConfig) (SocksConfig, error) {
 	}
 	if normalized.L4HalfOpenTimeout.Duration() <= 0 {
 		normalized.L4HalfOpenTimeout = Duration(DefaultL4HalfOpenTimeout)
+	}
+	if normalized.L4MaxStreams <= 0 {
+		normalized.L4MaxStreams = DefaultL4MaxStreams
+	}
+	if normalized.L4MaxStreams > MaxL4MaxStreams {
+		normalized.L4MaxStreams = MaxL4MaxStreams
 	}
 	switch strings.ToLower(strings.TrimSpace(normalized.L4UDP)) {
 	case "", L4UDPBlock:
