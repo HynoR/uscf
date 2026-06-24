@@ -101,14 +101,6 @@ func setupAndRunL4Proxy(cmd *cobra.Command, overrides []string, configSaved bool
 
 	connectionTimeout, idleTimeout := getL4TimeoutSettings()
 
-	// The shared L4 QUIC connection has no MaintainTunnel-style liveness loop — keepalive is
-	// its only defense against Cloudflare/quic-go idle-evicting it during a quiet period. A
-	// keepalive_period of 0 is fine for the lazy L3 tunnel but would self-destruct the always-on
-	// L4 connection every ~30s of idle, so l4QUICConfig floors it to 30s; warn that we did.
-	if config.AppConfig.Socks.KeepalivePeriod.Duration() <= 0 {
-		slog.Warn("l4: keepalive_period <= 0; clamping the shared QUIC connection's keepalive to 30s so it is not idle-evicted between flows", "configured", config.AppConfig.Socks.KeepalivePeriod.Duration())
-	}
-
 	l4Proxy, err := api.NewL4Proxy(api.L4ProxyConfig{
 		TLSConfig:                  tlsConfig,
 		QUICConfig:                 l4QUICConfig(config.AppConfig.Socks.KeepalivePeriod.Duration(), config.AppConfig.Socks.InitialPacketSize),
@@ -231,13 +223,12 @@ func selectL4Endpoint() (*net.UDPAddr, func() net.Addr, error) {
 // InitialPacketSize) to match uscf's proven L3 default rather than pinning a
 // fixed packet size.
 func l4QUICConfig(keepalivePeriod time.Duration, initialPacketSize uint16) *quic.Config {
-	// Floor the keepalive so the shared L4 connection can never be left without one: with
-	// KeepAlivePeriod=0 and MaxIdleTimeout unset, quic-go disables keepalive PINGs and falls
-	// back to its ~30s idle timeout, silently idle-closing the connection during any quiet
-	// window. mihomo/usque both pin 30s for exactly this reason. (L3 and the lazy mix UDP leg
-	// legitimately use 0 and are unaffected — this floor is L4-shared-connection-local.)
+	// Defensive floor: the shared L4 connection has no reconnect supervisor, so keepalive is
+	// its only defense against quic-go idle-evicting it (KeepAlivePeriod=0 + MaxIdleTimeout
+	// unset => PINGs disabled, ~30s idle close). NormalizeSocksConfig already backfills
+	// keepalive_period to DefaultKeepalivePeriod, so this only guards a non-normalized caller.
 	if keepalivePeriod <= 0 {
-		keepalivePeriod = 30 * time.Second
+		keepalivePeriod = config.DefaultKeepalivePeriod
 	}
 	return &quic.Config{
 		EnableDatagrams:                false,

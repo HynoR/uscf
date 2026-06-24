@@ -134,7 +134,7 @@ type SocksConfig struct {
 	NoTunnelIPv6         bool     `json:"no_tunnel_ipv6"`         // 是否在MASQUE隧道内禁用IPv6
 	BlockUDP443          bool     `json:"block_udp_443"`          // Whether to block outbound UDP/443 (QUIC)
 	SNIAddress           string   `json:"sni_address"`            // MASQUE连接使用的SNI地址
-	KeepalivePeriod      Duration `json:"keepalive_period"`       // MASQUE连接的心跳周期
+	KeepalivePeriod      Duration `json:"keepalive_period"`       // MASQUE连接(QUIC)的心跳周期,空闲时按此周期发PING防止被idle清掉;仅HTTP/3模式有效;<=0取默认(30s),即漏写也会保活(L3隧道与L4共享连接均依赖它)
 	MTU                  int      `json:"mtu"`                    // MASQUE连接的MTU
 	InitialPacketSize    uint16   `json:"initial_packet_size"`    // MASQUE连接的初始包大小
 	ReconnectDelay       Duration `json:"reconnect_delay"`        // 重连尝试之间的延迟
@@ -168,6 +168,14 @@ const (
 	// (QUIC-in-QUIC over the tunnel would throttle bandwidth — apps fall back to TCP).
 	L4UDPTunnel = "tunnel"
 )
+
+// DefaultKeepalivePeriod is the QUIC keepalive (heartbeat) period for MASQUE connections.
+// NormalizeSocksConfig backfills it field-wise (<=0 -> this default), so a populated socks
+// block that simply omits keepalive_period still gets a heartbeat. Without it the L3 tunnel
+// and the L4 shared connection would run with keepalive disabled and be idle-evicted by
+// Cloudflare/quic-go during quiet periods — and L4 has no reconnect supervisor, so it would
+// self-destruct every idle window. usque and mihomo both pin 30s.
+const DefaultKeepalivePeriod = 30 * time.Second
 
 // L4 shared-connection scaling and stream-lifetime defaults. L4 multiplexes every
 // TCP flow as one QUIC stream over shared QUIC connection(s), so the live-stream
@@ -408,7 +416,7 @@ func GetDefaultSocksConfig() SocksConfig {
 		L4:              false,
 		L4UDP:           L4UDPBlock,
 		SNIAddress:      "", // 这应当从internal.ConnectSNI读取，但现在我们不修改其他文件
-		KeepalivePeriod: Duration(30 * time.Second),
+		KeepalivePeriod: Duration(DefaultKeepalivePeriod),
 		// MTU is the inner (tunneled) packet size. 1280 is the safe default;
 		// values up to ~1400 are supported — oversized packets are clamped back
 		// by the connect-ip ICMP packet-too-big response, which always
@@ -509,6 +517,14 @@ func NormalizeSocksConfig(cfg SocksConfig) (SocksConfig, error) {
 	}
 	if normalized.DrainGrace.Duration() <= 0 {
 		normalized.DrainGrace = GetDefaultSocksConfig().DrainGrace
+	}
+	// keepalive_period backfills to its default field-wise (like the timeouts below) so a
+	// populated socks block that omits it still gets a QUIC heartbeat. Without this the L3
+	// tunnel and the L4 shared connection would run with keepalive disabled and be idle-
+	// evicted during quiet periods (L4 has no reconnect supervisor — it would self-destruct
+	// every idle window). The lazy mix-mode UDP leg is unaffected: it hardcodes 0 in Go.
+	if normalized.KeepalivePeriod.Duration() <= 0 {
+		normalized.KeepalivePeriod = Duration(DefaultKeepalivePeriod)
 	}
 	if normalized.L4HalfOpenTimeout.Duration() <= 0 {
 		normalized.L4HalfOpenTimeout = Duration(DefaultL4HalfOpenTimeout)

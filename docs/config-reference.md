@@ -65,7 +65,7 @@ These fields only affect `uscf proxy`. WG mode runs `uscf socks`, so it logs and
 | `socks.no_tunnel_ipv4` / `socks.no_tunnel_ipv6` | Disable an IP family inside the MASQUE tunnel. |
 | `socks.block_udp_443` | Reject outbound UDP/443 through the SOCKS proxy. |
 | `socks.sni_address` | MASQUE TLS SNI override. Leave empty unless you know why it is needed. |
-| `socks.keepalive_period` | QUIC keepalive period. Only applies to HTTP/3 mode. |
+| `socks.keepalive_period` | QUIC keepalive (heartbeat) period — on an idle connection the client sends a PING every period so Cloudflare/quic-go (and NAT) don't idle-evict it. Only applies to HTTP/3 (QUIC) mode. Default `30s` (matching usque/mihomo); `<=0` backfills to the default, so omitting it still keeps a heartbeat. Used by **both** the L3 connect-ip tunnel and the L4 shared connection — L4 especially depends on it because it has no reconnect supervisor, so a disabled keepalive would let the shared connection self-evict every idle window. The lazy mix-mode UDP leg ignores this and is hardcoded to no keepalive (it is *meant* to self-evict and sleep). |
 | `socks.mtu` | Netstack TUN (inner) MTU. Default `1280`; values up to `1400` are supported — oversized packets are clamped back to 1280 via ICMP packet-too-big. |
 | `socks.initial_packet_size` | Initial QUIC packet size; seeds path MTU discovery, which probes upward from here. Default `1350` (the measured Cloudflare floor is `1242`). Only applies to HTTP/3 mode. |
 | `socks.reconnect_delay` | Initial reconnect delay. |
