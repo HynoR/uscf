@@ -45,6 +45,13 @@ const (
 	// the full connect timeout and inbound flows piling up. It is clamped to the
 	// connect timeout with a 1s floor.
 	defaultL4StreamOpenTimeout = 5 * time.Second
+	// l4MaxConsecutiveConnFailures is how many CONNECT handshakes may fail in a row —
+	// with no Cloudflare response in between — before the shared connection is declared
+	// wedged and rebuilt (see noteConnFailure). High enough that a transient blip or an
+	// occasional slow/blackholed target (interspersed with successes that reset the run)
+	// never trips it; low enough that a fully wedged connection, where every dial fails,
+	// is caught within one connect-timeout window.
+	l4MaxConsecutiveConnFailures = 100
 )
 
 // L4ProxyConfig configures a new L4Proxy.
@@ -88,8 +95,9 @@ type L4Proxy struct {
 	clientConn  *http3.ClientConn
 	cachedLocal net.Addr // local addr of the current connection's UDP socket (for SOCKS replies)
 
-	inFlight   atomic.Int64  // currently open CONNECT streams (observability only — not a cap)
-	reconnects atomic.Uint64 // cumulative shared-connection rebuilds (self-heal counter)
+	inFlight         atomic.Int64  // currently open CONNECT streams (observability only — not a cap)
+	reconnects       atomic.Uint64 // cumulative shared-connection rebuilds (self-heal counter)
+	consecutiveFails atomic.Int64  // CONNECT handshakes failed in a row with no CF answer; rebuilds when it crosses l4MaxConsecutiveConnFailures
 }
 
 // errL4ProxyClosed is returned when a dial loses the race with Close.
@@ -225,9 +233,36 @@ func (p *L4Proxy) closeConn(stale *http3.ClientConn) {
 	p.udpConn, p.quicConn, p.clientConn, p.cachedLocal = nil, nil, nil, nil
 	p.mu.Unlock()
 
+	p.consecutiveFails.Store(0)
 	p.reconnects.Add(1)
 	slog.Debug("l4 tearing down shared QUIC connection; next dial rebuilds")
 	closeL4HTTP3(udpConn, quicConn)
+}
+
+// noteConnFailure records a CONNECT-handshake failure on the shared connection: a stream
+// opened, but Cloudflare delivered no response. A wedged connection stays alive at the
+// QUIC layer (keepalive still flows, so OpenRequestStream keeps succeeding and quic-go
+// never reports it dead) yet answers nothing — so the rebuild-on-OpenRequestStream-failure
+// path never fires and every dial hangs to its deadline. When enough handshakes fail in a
+// row with no answer in between, the connection is wedged: tear it down so the next dial
+// rebuilds. A single 2xx OR per-target rejection resets the run, so an occasional slow or
+// blackholed target among healthy traffic never trips it. Ignored when the caller gave up
+// (its ctx was cancelled) or when the failure is on an already-replaced connection.
+func (p *L4Proxy) noteConnFailure(clientConn *http3.ClientConn, ctx context.Context) {
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return
+	}
+	p.mu.Lock()
+	current := p.clientConn == clientConn
+	p.mu.Unlock()
+	if !current {
+		return
+	}
+	if p.consecutiveFails.Add(1) >= l4MaxConsecutiveConnFailures {
+		slog.Warn("l4 shared connection stopped answering CONNECTs (wedged); forcing a rebuild",
+			"consecutive_failures", l4MaxConsecutiveConnFailures)
+		p.closeConn(clientConn)
+	}
 }
 
 // localAddr returns the cached connection's local UDP address (for SOCKS bound-address
@@ -277,6 +312,16 @@ func (p *L4Proxy) DialContext(ctx context.Context, target string) (net.Conn, err
 		return nil, err
 	}
 
+	// Bound the CONNECT handshake explicitly. On a wedged connection (Cloudflare still
+	// terminates QUIC and grants streams, so OpenRequestStream succeeds, but no longer
+	// answers CONNECTs) ReadResponse would otherwise hang until the caller's deadline —
+	// or forever if it set none. noteConnFailure turns a run of these into a rebuild.
+	handshakeDeadline, ok := ctx.Deadline()
+	if !ok {
+		handshakeDeadline = time.Now().Add(p.connectTimeout)
+	}
+	_ = stream.SetDeadline(handshakeDeadline)
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodConnect, "https://"+target, nil)
 	if err != nil {
 		closeL4Stream(stream)
@@ -285,13 +330,20 @@ func (p *L4Proxy) DialContext(ctx context.Context, target string) (net.Conn, err
 	req.Host = target
 	if err := stream.SendRequestHeader(req); err != nil {
 		closeL4Stream(stream)
+		p.noteConnFailure(clientConn, ctx)
 		return nil, err
 	}
 	response, err := stream.ReadResponse()
 	if err != nil {
 		closeL4Stream(stream)
+		p.noteConnFailure(clientConn, ctx)
 		return nil, err
 	}
+	// Cloudflare answered — a 2xx or a per-target rejection alike proves the shared
+	// connection is servicing requests, so clear the wedge run and the handshake deadline
+	// (the relay re-arms its own deadlines from here on).
+	p.consecutiveFails.Store(0)
+	_ = stream.SetDeadline(time.Time{})
 	if response.StatusCode < 200 || response.StatusCode > 299 {
 		// A valid non-2xx means the connection is healthy and only this target was
 		// rejected: close just the stream, never the connection.

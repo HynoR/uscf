@@ -321,3 +321,94 @@ func TestL4ProxyCloseConnRebuildsOnce(t *testing.T) {
 		t.Fatalf("reconnects = %d after teardown, want 1", rc)
 	}
 }
+
+func newTestL4Proxy(t *testing.T) *L4Proxy {
+	t.Helper()
+	p, err := NewL4Proxy(L4ProxyConfig{
+		TLSConfig: &tls.Config{},
+		Endpoint:  &net.UDPAddr{IP: net.IPv4(1, 1, 1, 1), Port: 443},
+	})
+	if err != nil {
+		t.Fatalf("NewL4Proxy: %v", err)
+	}
+	return p
+}
+
+// TestL4ProxyRebuildsOnConsecutiveConnFailures proves the wedge detector: a run of
+// CONNECT-handshake failures with no intervening Cloudflare answer rebuilds the shared
+// connection (the case OpenRequestStream-failure recovery misses), and the run resets
+// after the rebuild.
+func TestL4ProxyRebuildsOnConsecutiveConnFailures(t *testing.T) {
+	p := newTestL4Proxy(t)
+	cc := &http3.ClientConn{} // nil conns: closeL4HTTP3 is nil-safe
+	p.mu.Lock()
+	p.clientConn = cc
+	p.mu.Unlock()
+	ctx := context.Background()
+
+	// Just under the threshold: no rebuild yet, connection still cached.
+	for i := 0; i < l4MaxConsecutiveConnFailures-1; i++ {
+		p.noteConnFailure(cc, ctx)
+	}
+	if _, rc := p.Stats(); rc != 0 {
+		t.Fatalf("reconnects = %d below threshold, want 0", rc)
+	}
+	p.mu.Lock()
+	stillCached := p.clientConn == cc
+	p.mu.Unlock()
+	if !stillCached {
+		t.Fatal("connection must survive a sub-threshold failure run")
+	}
+
+	// One more crosses the threshold → rebuild, and the run resets.
+	p.noteConnFailure(cc, ctx)
+	if _, rc := p.Stats(); rc != 1 {
+		t.Fatalf("reconnects = %d at threshold, want 1", rc)
+	}
+	p.mu.Lock()
+	cleared := p.clientConn == nil
+	p.mu.Unlock()
+	if !cleared {
+		t.Fatal("wedge rebuild must clear the cached connection")
+	}
+	if p.consecutiveFails.Load() != 0 {
+		t.Fatalf("consecutiveFails = %d after rebuild, want 0 (reset)", p.consecutiveFails.Load())
+	}
+}
+
+// TestL4ProxyConnFailureIgnoresStaleAndCancelled verifies the two guards: a failure on an
+// already-replaced connection must not count (it would otherwise prematurely tear down the
+// fresh connection), and a caller-cancelled dial must not count (the client gave up — the
+// connection is not at fault).
+func TestL4ProxyConnFailureIgnoresStaleAndCancelled(t *testing.T) {
+	p := newTestL4Proxy(t)
+	cc := &http3.ClientConn{}
+	p.mu.Lock()
+	p.clientConn = cc
+	p.mu.Unlock()
+
+	// Failures attributed to a DIFFERENT (already-replaced) connection are ignored.
+	stale := &http3.ClientConn{}
+	for i := 0; i < l4MaxConsecutiveConnFailures*2; i++ {
+		p.noteConnFailure(stale, context.Background())
+	}
+	if got := p.consecutiveFails.Load(); got != 0 {
+		t.Fatalf("stale-connection failures counted (%d); they must be ignored", got)
+	}
+	if _, rc := p.Stats(); rc != 0 {
+		t.Fatalf("stale-connection failures rebuilt (reconnects=%d); they must not", rc)
+	}
+
+	// Caller-cancelled dials are ignored.
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for i := 0; i < l4MaxConsecutiveConnFailures*2; i++ {
+		p.noteConnFailure(cc, cancelledCtx)
+	}
+	if got := p.consecutiveFails.Load(); got != 0 {
+		t.Fatalf("caller-cancelled dials counted (%d); they must be ignored", got)
+	}
+	if _, rc := p.Stats(); rc != 0 {
+		t.Fatalf("caller-cancelled dials rebuilt (reconnects=%d); they must not", rc)
+	}
+}
