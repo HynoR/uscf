@@ -311,23 +311,3 @@ func RebindLicense(accountData models.AccountData, target string) (models.Accoun
 
 	return finalAccount, true, nil, nil
 }
-
-// ApplyLicense updates the Cloudflare account with a user-provided WARP+ license.
-//
-// Parameters:
-//   - accountData: models.AccountData - Must contain ID and Token.
-//   - license: string - WARP+ license key.
-//
-// Returns:
-//   - models.AccountData: Updated account data from API.
-//   - *models.APIError: Parsed API error when status code is non-2xx.
-//   - error: Transport/parsing error.
-func ApplyLicense(accountData models.AccountData, license string) (models.AccountData, *models.APIError, error) {
-	account, _, apiErr, err := RebindLicense(accountData, license)
-	if err != nil {
-		return models.AccountData{}, apiErr, err
-	}
-
-	accountData.Account = account
-	return accountData, nil, nil
-}

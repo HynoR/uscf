@@ -246,7 +246,7 @@ Split routing applies to usque mode only:
 - `socks.bypass_domain`: domains that should go directly through the current network.
 - `socks.proxy_tcp_port`: TCP destination port allowlist for MASQUE. When non-empty, it takes priority over `bypass_domain`.
 
-Start from `examples/usque-advanced/config.json`, then read [docs/config-reference.md](docs/config-reference.md) before enabling advanced routing, DNS, reconnect, or self-check options.
+Start from `examples/usque-advanced/config.json`, then read [docs/config-reference.md](docs/config-reference.md) before enabling advanced routing, DNS, or reconnect options.
 
 ## Documentation
 

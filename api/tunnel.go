@@ -43,21 +43,6 @@ func (n *NetBuffer) PutBuf(buf *[]byte) {
 	n.buf.Put(buf)
 }
 
-// Get returns a byte slice from the pool.
-func (n *NetBuffer) Get() []byte {
-	return *(n.buf.Get().(*[]byte))
-}
-
-// Put places a byte slice back into the pool.
-// It checks if the capacity of the byte slice matches the pool's capacity.
-// If it doesn't match, the byte slice is not returned to the pool.
-func (n *NetBuffer) Put(buf []byte) {
-	if cap(buf) != n.capacity {
-		return
-	}
-	n.buf.Put(&buf)
-}
-
 // NewNetBuffer creates a new NetBuffer with the specified capacity.
 // The capacity must be greater than 0.
 func NewNetBuffer(capacity int) *NetBuffer {

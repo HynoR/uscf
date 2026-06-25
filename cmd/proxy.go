@@ -3,7 +3,6 @@ package cmd
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -728,94 +727,6 @@ func handleRegistration(cmd *cobra.Command, configPath, accountMode, customLicen
 
 	// 标记配置已加载
 	config.ConfigLoaded = true
-	return nil
-}
-
-func applyCustomLicense(configPath, customLicense string) error {
-	if config.AppConfig.ID == "" || config.AppConfig.AccessToken == "" {
-		return fmt.Errorf("Failed to apply license: missing id/access_token in config")
-	}
-
-	accountData := models.AccountData{
-		ID:    config.AppConfig.ID,
-		Token: config.AppConfig.AccessToken,
-	}
-
-	slog.Info("fetching remote account license")
-	finalAccount, changed, apiErr, err := rebindLicenseFunc(accountData, customLicense)
-	if err != nil {
-		if apiErr != nil {
-			return fmt.Errorf("Failed to apply license: %v (API errors: %s)", err, apiErr.ErrorsAsString("; "))
-		}
-		return fmt.Errorf("Failed to apply license: %v", err)
-	}
-	if changed {
-		slog.Info("remote license differs, updating via PUT")
-		slog.Info("license update completed")
-		slog.Info("re-enrolling current MASQUE key after license change")
-		if err := reenrollCurrentMasqueKey(); err != nil {
-			return err
-		}
-	} else {
-		slog.Info("remote license already matches target")
-	}
-
-	config.AppConfig.License = finalAccount.License
-	if err := config.AppConfig.SaveConfig(configPath); err != nil {
-		return fmt.Errorf("Failed to save config after license update: %v", err)
-	}
-	slog.Info("license updated successfully")
-
-	return nil
-}
-
-func reenrollCurrentMasqueKey() error {
-	privKey, err := config.AppConfig.GetEcPrivateKey()
-	if err != nil {
-		return fmt.Errorf("Failed to get private key for re-enroll: %v", err)
-	}
-
-	pubKey, err := x509.MarshalPKIXPublicKey(&privKey.PublicKey)
-	if err != nil {
-		return fmt.Errorf("Failed to marshal public key for re-enroll: %v", err)
-	}
-
-	accountData := models.AccountData{
-		ID:    config.AppConfig.ID,
-		Token: config.AppConfig.AccessToken,
-	}
-
-	updatedAccountData, apiErr, err := enrollKeyFunc(accountData, pubKey, config.AppConfig.Registration.DeviceName)
-	if err != nil {
-		if apiErr != nil {
-			return fmt.Errorf("Failed to re-enroll key after license update: %v (API errors: %s)", err, apiErr.ErrorsAsString("; "))
-		}
-		return fmt.Errorf("Failed to re-enroll key after license update: %v", err)
-	}
-
-	if len(updatedAccountData.Config.Peers) == 0 {
-		return fmt.Errorf("Failed to re-enroll key after license update: response has no peers")
-	}
-
-	peer := updatedAccountData.Config.Peers[0]
-	endpointV4, err := parseEndpointHost(peer.Endpoint.V4)
-	if err != nil {
-		return fmt.Errorf("Failed to parse IPv4 endpoint after re-enroll: %v", err)
-	}
-	endpointV6, err := parseEndpointHost(peer.Endpoint.V6)
-	if err != nil {
-		return fmt.Errorf("Failed to parse IPv6 endpoint after re-enroll: %v", err)
-	}
-
-	config.AppConfig.EndpointV4 = endpointV4
-	config.AppConfig.EndpointV6 = endpointV6
-	config.AppConfig.EndpointPubKey = peer.PublicKey
-	config.AppConfig.IPv4 = updatedAccountData.Config.Interface.Addresses.V4
-	config.AppConfig.IPv6 = updatedAccountData.Config.Interface.Addresses.V6
-	if updatedAccountData.ID != "" {
-		config.AppConfig.ID = updatedAccountData.ID
-	}
-
 	return nil
 }
 

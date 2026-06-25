@@ -144,31 +144,6 @@ func (r *CachingResolver) ClearCache() {
 	r.cache = make(map[string]*cacheEntry)
 }
 
-// CachingDNSResolver is kept for backward compatibility.
-// It wraps a local net.Resolver with CachingResolver.
-type CachingDNSResolver struct {
-	*CachingResolver
-}
-
-// NewCachingDNSResolver creates a new caching DNS resolver using a local DNS server.
-// dnsServer: DNS server address, e.g. "8.8.8.8:53"
-// timeout: DNS query timeout
-func NewCachingDNSResolver(dnsServer string, timeout time.Duration) *CachingDNSResolver {
-	if dnsServer == "" {
-		dnsServer = "8.8.8.8:53"
-	}
-	if timeout <= 0 {
-		timeout = 5 * time.Second
-	}
-	inner := &LocalDNSResolver{
-		DNSServer: dnsServer,
-		Timeout:   timeout,
-	}
-	return &CachingDNSResolver{
-		CachingResolver: NewCachingResolver(inner, 10*time.Minute, 5*time.Second, 4096),
-	}
-}
-
 // LocalDNSResolver performs DNS resolution against a specific UDP DNS server.
 type LocalDNSResolver struct {
 	DNSServer string

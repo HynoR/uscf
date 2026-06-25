@@ -7,7 +7,6 @@ package wireguard
 
 import (
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/base64"
 	"fmt"
 
@@ -20,11 +19,6 @@ type Key [KeyLength]byte
 
 func (k *Key) String() string {
 	return base64.StdEncoding.EncodeToString(k[:])
-}
-
-func (k *Key) IsZero() bool {
-	var zeros Key
-	return subtle.ConstantTimeCompare(zeros[:], k[:]) == 1
 }
 
 func (k *Key) Public() *Key {

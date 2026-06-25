@@ -172,15 +172,6 @@ func TestTunnelDNSResolver_Race(t *testing.T) {
 	_ = TunnelDNSResolver{}
 }
 
-func TestLocalDNSResolver_BackwardCompatibility(t *testing.T) {
-	// Verify that NewCachingDNSResolver still returns a usable resolver.
-	// We can't do real DNS queries in unit tests, so just verify the type.
-	r := NewCachingDNSResolver("8.8.8.8:53", time.Second)
-	if r == nil {
-		t.Fatal("expected non-nil resolver")
-	}
-}
-
 func TestCachingResolver_ClearCache(t *testing.T) {
 	inner := newFakeResolver()
 	inner.addResult("example.com", net.ParseIP("1.2.3.4"))

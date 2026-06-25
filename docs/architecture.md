@@ -19,7 +19,7 @@ New deployments should use split configuration files:
 
 | File | Used by | Contents |
 |---|---|---|
-| `config.json` | usque and wg | Reusable runtime settings: SOCKS bind/port/auth, logging, registration name, custom MASQUE endpoints |
+| `config.json` | usque and wg | Reusable runtime settings: SOCKS bind/port/auth, logging, registration name |
 | `key.json` | usque only | MASQUE identity and account state: `private_key`, `endpoint_*`, `account_mode`, `license`, `id`, `access_token`, assigned IPs |
 | `wg-account.json` | wg account management | Standalone WireGuard account state: device id, token, license, WireGuard private key |
 | `wgcf.conf` | wg runtime | WireGuard profile consumed by `wg-quick` |
@@ -43,7 +43,7 @@ If an existing usque account is already `premium` or `team`, startup ignores `--
 
 - In usque mode, `proxy` owns registration, account switching, MASQUE key enrollment, TUN setup, routing policy, DNS policy, and the SOCKS listener.
 - In wg mode, the Docker entrypoint owns WireGuard bootstrap and `wg-quick`; `uscf socks` only exposes SOCKS over the container network route.
-- `uscf socks` does not read `key.json`, does not create a MASQUE tunnel, and ignores tunnel-only settings such as `bypass_domain`, `proxy_tcp_port`, custom endpoints, remote DNS, and MASQUE identity fields.
+- `uscf socks` does not read `key.json`, does not create a MASQUE tunnel, and ignores tunnel-only settings such as `bypass_domain`, `proxy_tcp_port`, remote DNS, and MASQUE identity fields.
 - `proxy` CLI overrides for bind address, port, username, password, and `use_ipv6` are saved back to config.
 - `socks` CLI overrides in the WG image are runtime-only and do not rewrite `config.json`.
 - `WG_TEAM_JWT` is only consumed by the WG image when all three files are missing: `config.json`, `wg-account.json`, and `wgcf.conf`.

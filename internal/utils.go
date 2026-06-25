@@ -7,23 +7,11 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
-	"errors"
 	"math/big"
-	"net"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/quic-go/quic-go"
 )
-
-// PortMapping represents a network port forwarding rule.
-type PortMapping struct {
-	BindAddress string // The address to bind the local port.
-	LocalPort   int    // The local port number.
-	RemoteIP    string // The remote destination IP address.
-	RemotePort  int    // The remote destination port number.
-}
 
 // GenerateRandomAndroidSerial generates a random 8-byte Android-like device identifier
 // and returns it as a hexadecimal string.
@@ -129,144 +117,4 @@ func DefaultQuicConfig(keepalivePeriod time.Duration, initialPacketSize uint16) 
 		InitialPacketSize: initialPacketSize,
 		KeepAlivePeriod:   keepalivePeriod,
 	}
-}
-
-// parsePortMapping is an internal helper function that parses a port mapping string into its components.
-//
-// It handles IPv6 addresses enclosed in brackets and various format edge cases.
-//
-// Parameters:
-//   - port: string - The port mapping string.
-//
-// Returns:
-//   - string: The bind address.
-//   - int: The local port.
-//   - string: The remote hostname/IP.
-//   - int: The remote port.
-//   - error: An error if parsing fails.
-func parsePortMapping(port string) (bindAddress string, localPort int, remoteHost string, remotePort int, err error) {
-	parts := strings.Split(port, ":")
-
-	// Handle IPv6 addresses (which are enclosed in brackets)
-	if len(parts) >= 4 && strings.HasPrefix(parts[0], "[") && strings.Contains(parts[0], "]") {
-		bindAddress = parts[0]
-		parts = parts[1:] // Shift parts forward
-	} else if len(parts) == 3 {
-		bindAddress = "localhost" // Default to localhost
-	} else if len(parts) == 4 {
-		bindAddress = parts[0]
-		parts = parts[1:] // Shift forward
-	} else {
-		return "", 0, "", 0, errors.New("invalid port mapping format (expected format: [bind_address:]local_port:remote_host:remote_port)")
-	}
-
-	// Parse local port
-	localPort, err = strconv.Atoi(parts[0])
-	if err != nil || localPort <= 0 || localPort > 65535 {
-		return "", 0, "", 0, errors.New("invalid local port")
-	}
-
-	// Validate remote host (allow both hostnames and IPs)
-	remoteHost = parts[1]
-	if net.ParseIP(remoteHost) == nil && !isValidHostname(remoteHost) {
-		return "", 0, "", 0, errors.New("invalid remote hostname/IP")
-	}
-
-	// Parse remote port
-	remotePort, err = strconv.Atoi(parts[2])
-	if err != nil || remotePort <= 0 || remotePort > 65535 {
-		return "", 0, "", 0, errors.New("invalid remote port")
-	}
-
-	// If bindAddress is an IPv6 address, remove brackets for proper binding
-	if strings.HasPrefix(bindAddress, "[") && strings.HasSuffix(bindAddress, "]") {
-		bindAddress = strings.Trim(bindAddress, "[]")
-	}
-
-	// Convert "localhost" or hostnames to actual addresses
-	if bindAddress == "*" {
-		bindAddress = "0.0.0.0" // Allow all interfaces
-	}
-
-	// Validate bind address (support both IPs and hostnames)
-	bindAddress, err = resolveBindAddress(bindAddress)
-	if err != nil {
-		return "", 0, "", 0, errors.New("invalid local address: " + err.Error())
-	}
-
-	remoteHost, err = resolveBindAddress(remoteHost)
-	if err != nil {
-		return "", 0, "", 0, errors.New("invalid remote address: " + err.Error())
-	}
-
-	return bindAddress, localPort, remoteHost, remotePort, nil
-}
-
-// ParsePortMapping parses a port mapping string into a structured PortMapping.
-//
-// The expected format is: `[bind_address:]local_port:remote_host:remote_port`.
-//
-// Parameters:
-//   - port: string - The port mapping string.
-//
-// Returns:
-//   - PortMapping: A structured representation of the parsed port mapping.
-//   - error:       An error if the parsing fails.
-func ParsePortMapping(port string) (PortMapping, error) {
-	bindAddress, localPort, remoteHost, remotePort, err := parsePortMapping(port)
-	if err != nil {
-		return PortMapping{}, err
-	}
-
-	return PortMapping{
-		BindAddress: bindAddress,
-		LocalPort:   localPort,
-		RemoteIP:    remoteHost,
-		RemotePort:  remotePort,
-	}, nil
-}
-
-// resolveBindAddress resolves a hostname or IP to its string representation.
-//
-// Parameters:
-//   - addr: string - The hostname or IP.
-//
-// Returns:
-//   - string: The resolved IP address.
-//   - error:  An error if resolution fails.
-func resolveBindAddress(addr string) (string, error) {
-	tcpAddr, err := net.ResolveTCPAddr("tcp", addr+":0") // Resolve the address
-	if err != nil {
-		return "", err
-	}
-	return tcpAddr.IP.String(), nil // Return resolved IP
-}
-
-// isValidHostname checks if a given hostname is valid.
-// Pretty ugly for now, needs to be refactored.
-//
-// Parameters:
-//   - hostname: string - The hostname to validate.
-//
-// Returns:
-//   - bool: True if valid, false otherwise.
-func isValidHostname(hostname string) bool {
-	// Must contain at least one dot (.) unless it's "localhost"
-	if hostname == "localhost" {
-		return true
-	}
-	return strings.Contains(hostname, ".")
-}
-
-// LoginToBase64 encodes a username and password into a base64-encoded string in "username:password" format.
-// This is commonly used for HTTP Basic Authentication.
-//
-// Parameters:
-//   - username: string - The username to encode.
-//   - password: string - The password to encode.
-//
-// Returns:
-//   - string: The base64-encoded "username:password" string.
-func LoginToBase64(username, password string) string {
-	return base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
 }

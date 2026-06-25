@@ -133,8 +133,8 @@ type SocksConfig struct {
 	ReconnectDelay       Duration `json:"reconnect_delay"`        // 重连尝试之间的延迟
 	MaxReconnectAttempts int      `json:"max_reconnect_attempts"` // 连续连接失败阈值；达到后暂停重连等待人工处理，0表示无限重试
 	DrainGrace           Duration `json:"drain_grace"`            // 隧道断开后保留现有SOCKS连接的宽限期，超时仍未恢复则关闭
-	ConnectionTimeout    Duration `json:"connection_timeout"`     // 建立连接的超时时间(L3/SSH-SOCKS/WG;L4用l4_connection_timeout,两套协议互不影响)
-	IdleTimeout          Duration `json:"idle_timeout"`           // 空闲连接的超时时间(L3/SSH-SOCKS/WG;L4用l4_idle_timeout,两套协议互不影响)
+	ConnectionTimeout    Duration `json:"connection_timeout"`     // 建立连接的超时时间(L3/WG;L4用l4_connection_timeout,两套协议互不影响)
+	IdleTimeout          Duration `json:"idle_timeout"`           // 空闲连接的超时时间(L3/WG;L4用l4_idle_timeout,两套协议互不影响)
 	AlwaysReconnect      bool     `json:"always_reconnect"`       // true=断线后立即重连；false(默认)=隧道空闲被服务端清掉后，等到有出站流量再重连
 	L4HalfOpenTimeout    Duration `json:"l4_half_open_timeout"`   // L4模式半开TCP流的空闲上限:一方向结束后另一方向最多空闲多久就回收(随活动重置),避免滞留流占满共享连接的MAX_STREAMS;<=0取默认
 	L4ConnectionTimeout  Duration `json:"l4_connection_timeout"`  // L4模式建立连接/打开流的超时(与L3的connection_timeout隔离);<=0取默认

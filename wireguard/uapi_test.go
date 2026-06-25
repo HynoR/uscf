@@ -123,12 +123,12 @@ func TestBuildUAPIConfigErrors(t *testing.T) {
 	good := UAPIParams{PrivateKey: priv, PublicKey: peer.Public(), Endpoint: "1.2.3.4:2408"}
 
 	cases := map[string]func(p UAPIParams) UAPIParams{
-		"nil private key":   func(p UAPIParams) UAPIParams { p.PrivateKey = nil; return p },
-		"nil public key":    func(p UAPIParams) UAPIParams { p.PublicKey = nil; return p },
-		"empty endpoint":    func(p UAPIParams) UAPIParams { p.Endpoint = ""; return p },
-		"bad allowed ip":    func(p UAPIParams) UAPIParams { p.AllowedIPs = []string{"not-a-cidr"}; return p },
-		"bad listen port":   func(p UAPIParams) UAPIParams { p.ListenPort = 70000; return p },
-		"bad keepalive":     func(p UAPIParams) UAPIParams { p.PersistentKeepalive = -5; return p },
+		"nil private key": func(p UAPIParams) UAPIParams { p.PrivateKey = nil; return p },
+		"nil public key":  func(p UAPIParams) UAPIParams { p.PublicKey = nil; return p },
+		"empty endpoint":  func(p UAPIParams) UAPIParams { p.Endpoint = ""; return p },
+		"bad allowed ip":  func(p UAPIParams) UAPIParams { p.AllowedIPs = []string{"not-a-cidr"}; return p },
+		"bad listen port": func(p UAPIParams) UAPIParams { p.ListenPort = 70000; return p },
+		"bad keepalive":   func(p UAPIParams) UAPIParams { p.PersistentKeepalive = -5; return p },
 	}
 	for name, mutate := range cases {
 		if _, err := BuildUAPIConfig(mutate(good)); err == nil {

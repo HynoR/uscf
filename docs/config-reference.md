@@ -31,8 +31,8 @@ These fields are useful for both usque and WG mode.
 | `socks.port` | `1080` | both | SOCKS5 listen port |
 | `socks.username` | empty | both | Optional SOCKS5 username |
 | `socks.password` | empty | both | Optional SOCKS5 password |
-| `socks.connection_timeout` | `30s` | both | Timeout for outbound connection setup. **L3 / WireGuard / SSH-SOCKS only** — L4 mode uses `l4_connection_timeout` so the two transports tune in isolation. |
-| `socks.idle_timeout` | `5m` | both | Idle timeout for proxied connections. **L3 / WireGuard / SSH-SOCKS only** — L4 mode uses `l4_idle_timeout` (L4 streams are scarcer, so they reap sooner). |
+| `socks.connection_timeout` | `30s` | both | Timeout for outbound connection setup. **L3 / WireGuard only** — L4 mode uses `l4_connection_timeout` so the two transports tune in isolation. |
+| `socks.idle_timeout` | `5m` | both | Idle timeout for proxied connections. **L3 / WireGuard only** — L4 mode uses `l4_idle_timeout` (L4 streams are scarcer, so they reap sooner). |
 | `logging.level` | `info` | both | `debug`, `info`, `warn`, or `error` |
 | `logging.format` | `text` | both | `text` or `json` |
 | `logging.socks_verbose` | `false` | both | Extra SOCKS connection diagnostics |
