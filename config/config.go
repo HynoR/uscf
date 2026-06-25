@@ -132,7 +132,6 @@ type SocksConfig struct {
 	InitialPacketSize    uint16   `json:"initial_packet_size"`    // MASQUE连接的初始包大小
 	ReconnectDelay       Duration `json:"reconnect_delay"`        // 重连尝试之间的延迟
 	MaxReconnectAttempts int      `json:"max_reconnect_attempts"` // 连续连接失败阈值；达到后暂停重连等待人工处理，0表示无限重试
-	DrainGrace           Duration `json:"drain_grace"`            // 隧道断开后保留现有SOCKS连接的宽限期，超时仍未恢复则关闭
 	ConnectionTimeout    Duration `json:"connection_timeout"`     // 建立连接的超时时间(L3/WG;L4用l4_connection_timeout,两套协议互不影响)
 	IdleTimeout          Duration `json:"idle_timeout"`           // 空闲连接的超时时间(L3/WG;L4用l4_idle_timeout,两套协议互不影响)
 	AlwaysReconnect      bool     `json:"always_reconnect"`       // true=断线后立即重连；false(默认)=隧道空闲被服务端清掉后，等到有出站流量再重连
@@ -374,7 +373,6 @@ func GetDefaultSocksConfig() SocksConfig {
 		InitialPacketSize:    1350,
 		ReconnectDelay:       Duration(1 * time.Second),
 		MaxReconnectAttempts: 0,
-		DrainGrace:           Duration(15 * time.Second),
 		ConnectionTimeout:    Duration(30 * time.Second),
 		IdleTimeout:          Duration(5 * time.Minute),
 		AlwaysReconnect:      false,
@@ -440,9 +438,6 @@ func NormalizeSocksConfig(cfg SocksConfig) (SocksConfig, error) {
 	}
 	if normalized.ProxyTCPPort == nil {
 		normalized.ProxyTCPPort = []int{}
-	}
-	if normalized.DrainGrace.Duration() <= 0 {
-		normalized.DrainGrace = GetDefaultSocksConfig().DrainGrace
 	}
 	// keepalive_period backfills to its default field-wise (like the timeouts below) so a
 	// populated socks block that omits it still gets a QUIC heartbeat. Without this the L3

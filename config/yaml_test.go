@@ -140,7 +140,6 @@ func TestSaveThenLoadYAML_RoundTrip(t *testing.T) {
 			DNS:             []string{"8.8.8.8", "1.1.1.1"},
 			KeepalivePeriod: Duration(90 * time.Second),
 			IdleTimeout:     Duration(7 * time.Minute),
-			DrainGrace:      Duration(15 * time.Second),
 			L4UDP:           L4UDPDirect,
 		},
 		Logging: LoggingConfig{Level: "warn", Format: "json"},

@@ -188,6 +188,24 @@ func (a *txthinkingAdapter) relayTCP(client, upstream net.Conn) error {
 	go func() { errc <- a.copyHalf(client, upstream) }() // upstream -> client
 
 	err1 := <-errc
+	// io.Copy returns nil on a clean EOF (a graceful TCP half-close), so a non-nil
+	// error here means a direction failed HARD — a reset, the upstream tunnel dying
+	// under the flow, or an idle-deadline expiry. Tear BOTH conns down immediately
+	// so the surviving direction's blocked Read unblocks now, instead of waiting out
+	// its (minutes-long) idle deadline. This is what stops a flow from hanging when
+	// the WARP tunnel drops mid-request: the client gets a prompt reset and retries
+	// (which succeeds on the freshly reconnected tunnel) rather than stalling.
+	if err1 != nil {
+		_ = client.Close()
+		_ = upstream.Close()
+		<-errc // the other goroutine is now unblocked; reclaim it (and its buffer)
+		return err1
+	}
+
+	// Clean half-close: the flow is legitimately half-open (e.g. an HTTP client that
+	// finished its request and still awaits the response). Keep the surviving
+	// direction; for L4, shorten its idle so a silent half-open does not pin a scarce
+	// QUIC stream on the shared connection.
 	if a.halfOpenIdle > 0 {
 		shortenRelayIdle(client, a.halfOpenIdle)
 		shortenRelayIdle(upstream, a.halfOpenIdle)
@@ -195,9 +213,6 @@ func (a *txthinkingAdapter) relayTCP(client, upstream net.Conn) error {
 	err2 := <-errc
 	_ = client.Close()
 	_ = upstream.Close()
-	if err1 != nil {
-		return err1
-	}
 	return err2
 }
 

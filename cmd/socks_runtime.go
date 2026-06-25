@@ -22,22 +22,11 @@ type socksServer interface {
 	ServeConn(net.Conn) error
 }
 
-// drainHandle wraps a scheduled drain timer. The runtime stores it behind a
-// pointer whose identity is set before the timer fires, letting the AfterFunc
-// callback compare identity without racing on the timer assignment.
-type drainHandle struct {
-	timer *time.Timer
-}
-
 type socksRuntime struct {
 	tunnelUp       atomic.Bool
 	verboseLogging atomic.Bool
-	restartMu      sync.Mutex
-	drainMu        sync.Mutex
-	scheduledDrain *drainHandle
 	activeConns    sync.Map
-	server         atomic.Value // socksServer
-	serverFactory  func(dialFunc socksDialFunc) socksServer
+	server         socksServer
 	upstreamDial   socksDialFunc
 	demand         chan struct{} // cap-1: signals outbound demand while the tunnel is down
 }
@@ -47,11 +36,12 @@ func newSocksRuntime(
 	serverFactory func(dialFunc socksDialFunc) socksServer,
 ) *socksRuntime {
 	r := &socksRuntime{
-		serverFactory: serverFactory,
-		upstreamDial:  upstreamDial,
-		demand:        make(chan struct{}, 1),
+		upstreamDial: upstreamDial,
+		demand:       make(chan struct{}, 1),
 	}
-	r.server.Store(r.serverFactory(r.DialContext))
+	// The server is stateless and shared for the runtime's whole life (it holds no
+	// per-connection state), so it is built once here and never swapped.
+	r.server = serverFactory(r.DialContext)
 	return r
 }
 
@@ -103,12 +93,7 @@ func (r *socksRuntime) VerboseLoggingEnabled() bool {
 }
 
 func (r *socksRuntime) CurrentServer() socksServer {
-	loaded := r.server.Load()
-	if loaded == nil {
-		return nil
-	}
-	srv, _ := loaded.(socksServer)
-	return srv
+	return r.server
 }
 
 func (r *socksRuntime) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -174,75 +159,18 @@ func (r *socksRuntime) TrackConn(conn net.Conn) net.Conn {
 	return managed
 }
 
-func (r *socksRuntime) RestartAndDrain(reason error) {
-	r.CancelScheduledDrain()
-
-	r.restartMu.Lock()
-	defer r.restartMu.Unlock()
-	start := time.Now()
-
-	slog.Debug("drain restart", "reason", reason)
-	r.server.Store(r.serverFactory(r.DialContext))
-
-	drained := r.drainActiveConnections()
-	slog.Debug(
-		"drain complete",
-		"count",
-		drained,
-		"reason",
-		reason,
-		"duration",
-		time.Since(start),
-	)
-}
-
-func (r *socksRuntime) ScheduleDrain(reason error, grace time.Duration) {
-	if grace <= 0 {
-		r.RestartAndDrain(reason)
-		return
+// ResetTrackedConns closes every tracked downstream connection immediately. It is
+// called the moment the tunnel goes down: a MASQUE flow's edge state at Cloudflare
+// is destroyed when the tunnel drops, so the flow cannot resume on the next
+// connection — even one that reconnects in milliseconds. Closing it turns a silent
+// multi-minute hang into a prompt reset the client retries (and the retry succeeds
+// once the tunnel is back). New connections cannot be tracked while the tunnel is
+// down — the accept loop drops them (DropIfDisconnected) — so this only ever closes
+// genuinely-stranded flows.
+func (r *socksRuntime) ResetTrackedConns() {
+	if n := r.drainActiveConnections(); n > 0 {
+		slog.Info("reset stranded SOCKS connections (upstream tunnel dropped)", "count", n)
 	}
-
-	r.drainMu.Lock()
-	if r.scheduledDrain != nil {
-		r.drainMu.Unlock()
-		return
-	}
-
-	// handle's pointer identity is created before the timer so the AfterFunc
-	// callback only ever reads this fully-assigned pointer (captured by the
-	// closure) instead of a variable still being written by time.AfterFunc.
-	// handle.timer is assigned below while still holding drainMu, and is only
-	// read again under drainMu (CancelScheduledDrain), so it carries no race.
-	handle := &drainHandle{}
-	r.scheduledDrain = handle
-	handle.timer = time.AfterFunc(grace, func() {
-		r.clearScheduledDrain(handle)
-		if r.IsTunnelUp() {
-			return
-		}
-		r.RestartAndDrain(reason)
-	})
-	r.drainMu.Unlock()
-}
-
-func (r *socksRuntime) CancelScheduledDrain() bool {
-	r.drainMu.Lock()
-	handle := r.scheduledDrain
-	r.scheduledDrain = nil
-	r.drainMu.Unlock()
-
-	if handle == nil {
-		return false
-	}
-	return handle.timer.Stop()
-}
-
-func (r *socksRuntime) clearScheduledDrain(handle *drainHandle) {
-	r.drainMu.Lock()
-	if r.scheduledDrain == handle {
-		r.scheduledDrain = nil
-	}
-	r.drainMu.Unlock()
 }
 
 func (r *socksRuntime) drainActiveConnections() int {

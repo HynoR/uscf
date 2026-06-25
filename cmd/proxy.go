@@ -1093,7 +1093,6 @@ func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint net.Addr, t
 	mtu := config.AppConfig.Socks.MTU
 	reconnectDelay := config.AppConfig.Socks.ReconnectDelay.Duration()
 	maxReconnectAttempts := config.AppConfig.Socks.MaxReconnectAttempts
-	drainGrace := config.AppConfig.Socks.DrainGrace.Duration()
 	reconnectLog := &api.TunnelReconnectLog{Trigger: "backoff"}
 
 	configTunnel := api.ConnectionConfig{
@@ -1115,7 +1114,6 @@ func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint net.Addr, t
 		OnConnected: func() {
 			if socksRuntime != nil {
 				socksRuntime.SetTunnelUp(true)
-				socksRuntime.CancelScheduledDrain()
 				socksRuntime.drainDemand()
 			}
 			writeTunnelStateSafe(tunnelStateUp)
@@ -1130,6 +1128,11 @@ func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint net.Addr, t
 			}
 			reconnectLog.DisconnectedAt = time.Now()
 			socksRuntime.SetTunnelUp(false)
+			// Reset flows stranded by the drop NOW: their Cloudflare edge state is
+			// gone, so they cannot resume even on a sub-second reconnect — closing
+			// them makes the client retry (and the retry succeeds on the fresh
+			// tunnel) instead of hanging until an idle timeout fires minutes later.
+			socksRuntime.ResetTrackedConns()
 			reason, remote := api.TunnelDisconnectReason(err)
 			reconnectMode := "on_demand"
 			if config.AppConfig.Socks.AlwaysReconnect {
@@ -1142,7 +1145,6 @@ func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint net.Addr, t
 			attrs := []any{
 				"reason", reason,
 				"remote", remote,
-				"grace", drainGrace,
 				"reconnect", reconnectMode,
 			}
 			if !reconnectLog.ConnectedAt.IsZero() {
@@ -1152,7 +1154,6 @@ func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint net.Addr, t
 				attrs = append(attrs, "raw_error", err.Error())
 			}
 			slog.Warn("disconnected", attrs...)
-			socksRuntime.ScheduleDrain(err, drainGrace)
 		},
 	}
 

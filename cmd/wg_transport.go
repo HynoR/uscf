@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -285,10 +284,6 @@ const (
 	wgMaxRecoveryBackoff     = 5 * time.Minute
 )
 
-// errWGWedged is the drain reason recorded when the WireGuard session stops
-// receiving and the supervisor begins recovery.
-var errWGWedged = errors.New("wireguard session wedged: no response from peer")
-
 // wgHealth is a snapshot of the single peer's UAPI counters used by the wedge
 // detector.
 type wgHealth struct {
@@ -381,7 +376,6 @@ func superviseWireGuard(ctx context.Context, dev *device.Device, account config.
 	if poll <= 0 || poll > wgMaxPollInterval {
 		poll = wgMaxPollInterval
 	}
-	drainGrace := config.AppConfig.Socks.DrainGrace.Duration()
 
 	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
@@ -413,7 +407,6 @@ func superviseWireGuard(ctx context.Context, dev *device.Device, account config.
 				down = false
 				backoff = wgInitialRecoveryBackoff
 				runtime.SetTunnelUp(true)
-				runtime.CancelScheduledDrain()
 				writeTunnelStateSafe(tunnelStateUp)
 				slog.Info("wireguard recovered", "down_for", time.Since(wedgedAt).Round(time.Second))
 			}
@@ -432,9 +425,11 @@ func superviseWireGuard(ctx context.Context, dev *device.Device, account config.
 			wedgedAt = time.Now()
 			runtime.SetTunnelUp(false)
 			writeTunnelStateSafe(tunnelStateDown)
-			runtime.ScheduleDrain(errWGWedged, drainGrace)
+			// The wedged session's flows are dead; reset them now so clients retry
+			// instead of hanging while we re-point the endpoint.
+			runtime.ResetTrackedConns()
 			slog.Warn("wireguard session wedged (sending but no response); recovering",
-				"no_rx_for", time.Since(lastProgress).Round(time.Second), "grace", drainGrace)
+				"no_rx_for", time.Since(lastProgress).Round(time.Second))
 		}
 
 		if time.Since(lastAttempt) < backoff {
