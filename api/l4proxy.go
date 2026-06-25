@@ -102,6 +102,7 @@ type L4Proxy struct {
 	reconnects       atomic.Uint64 // cumulative shared-connection rebuilds (self-heal counter)
 	consecutiveFails atomic.Int64  // CONNECT handshakes failed in a row with no CF answer; rebuilds when it crosses maxConsecutiveFails
 	firstFailNanos   atomic.Int64  // unix-ns of the first un-answered failure in the current run; 0 = no run (drives the elapsed-time wedge trip)
+	establishedNanos atomic.Int64  // unix-ns the current shared connection was established; 0 = none (drives the uptime logged at teardown)
 }
 
 // errL4ProxyClosed is returned when a dial loses the race with Close.
@@ -203,11 +204,15 @@ func (p *L4Proxy) dialConn(ctx context.Context) (*http3.ClientConn, error) {
 
 	udpConn, err := listenUDPForEndpoint(endpoint)
 	if err != nil {
+		slog.Warn("l4 could not open local UDP socket for shared connection", "endpoint", endpoint.String(), "error", err)
 		return nil, err
 	}
 	quicConn, err := quic.Dial(dialCtx, udpConn, endpoint, p.tlsConfig, p.quicConfig)
 	if err != nil {
 		_ = udpConn.Close()
+		// The shared connection could not be (re)established — every flow fails until
+		// this succeeds, so surface it (not just the per-flow dial error the caller logs).
+		slog.Warn("l4 failed to establish shared QUIC connection to WARP", "endpoint", endpoint.String(), "error", err)
 		return nil, err
 	}
 	clientConn := (&http3.Transport{}).NewClientConn(quicConn)
@@ -221,9 +226,12 @@ func (p *L4Proxy) dialConn(ctx context.Context) (*http3.ClientConn, error) {
 	}
 	p.udpConn, p.quicConn, p.clientConn = udpConn, quicConn, clientConn
 	p.cachedLocal = udpConn.LocalAddr()
+	p.establishedNanos.Store(time.Now().UnixNano())
 	p.mu.Unlock()
 
-	slog.Debug("l4 established shared QUIC connection", "endpoint", endpoint.String())
+	// Info (not Debug): establishing the shared connection is a discrete WARP-interaction
+	// event — pairs with the teardown log so a rebuild cycle is visible at the default level.
+	slog.Info("l4 shared QUIC connection established", "endpoint", endpoint.String(), "rebuilds_total", p.reconnects.Load())
 	return clientConn, nil
 }
 
@@ -238,14 +246,52 @@ func (p *L4Proxy) closeConn(stale *http3.ClientConn) {
 		return
 	}
 	udpConn, quicConn := p.udpConn, p.quicConn
+	establishedNanos := p.establishedNanos.Load()
 	p.udpConn, p.quicConn, p.clientConn, p.cachedLocal = nil, nil, nil, nil
+	p.establishedNanos.Store(0)
 	p.mu.Unlock()
 
 	p.consecutiveFails.Store(0)
 	p.firstFailNanos.Store(0)
-	p.reconnects.Add(1)
-	slog.Debug("l4 tearing down shared QUIC connection; next dial rebuilds")
+	rebuilds := p.reconnects.Add(1)
+
+	uptime := time.Duration(0)
+	if establishedNanos != 0 {
+		uptime = time.Since(time.Unix(0, establishedNanos)).Round(time.Second)
+	}
+	// Info (not Debug): tearing down the shared connection IS the L4 "disconnect/reconnect"
+	// event. The close cause distinguishes the two failure modes the wedge detector and
+	// stream-open path both feed into here: a non-nil cause means quic-go saw the connection
+	// DIE (idle timeout, peer CONNECTION_CLOSE with a code, transport error) — a real drop;
+	// a nil cause means it is still alive at the QUIC layer but stopped answering CONNECTs
+	// (app-level wedge), which points at the proxy service rather than the QUIC path.
+	slog.Info("l4 shared QUIC connection torn down; next dial rebuilds",
+		"cause", quicConnCloseCause(quicConn),
+		"uptime", uptime,
+		"rebuilds_total", rebuilds)
 	closeL4HTTP3(udpConn, quicConn)
+}
+
+// quicConnCloseCause returns a human-readable reason a QUIC connection closed,
+// read from its context cancellation cause. quic-go sets this to the underlying
+// *quic.TransportError / *quic.ApplicationError when the connection dies. A nil
+// cause (context not yet done) means the connection is still alive at the QUIC
+// layer — surfaced as "alive_at_quic_layer" so an app-level wedge is unambiguous.
+func quicConnCloseCause(conn *quic.Conn) string {
+	if conn == nil {
+		return "unknown"
+	}
+	cause := context.Cause(conn.Context())
+	if cause == nil || errors.Is(cause, context.Canceled) {
+		return "alive_at_quic_layer"
+	}
+	if reason, remote, ok := tunnelQUICDisconnectReason(cause); ok {
+		if remote {
+			return reason + " (peer)"
+		}
+		return reason + " (local)"
+	}
+	return cause.Error()
 }
 
 // noteConnFailure records a CONNECT-handshake failure on the shared connection: a stream
@@ -265,7 +311,7 @@ func (p *L4Proxy) closeConn(stale *http3.ClientConn) {
 //     concurrency (1-2 flows) the count alone would need ~maxConsecutiveFails serial
 //     connect-timeout windows to trip — minutes to nearly an hour of 假死 — so the timer
 //     bounds recovery to ~one window regardless of how few flows drive it.
-func (p *L4Proxy) noteConnFailure(clientConn *http3.ClientConn, ctx context.Context) {
+func (p *L4Proxy) noteConnFailure(clientConn *http3.ClientConn, ctx context.Context, cause error) {
 	if errors.Is(ctx.Err(), context.Canceled) {
 		return
 	}
@@ -287,9 +333,18 @@ func (p *L4Proxy) noteConnFailure(clientConn *http3.ClientConn, ctx context.Cont
 	wedgedTooLong := first != 0 && wedgedFor >= 2*p.connectTimeout
 	if n >= p.maxConsecutiveFails || wedgedTooLong {
 		slog.Warn("l4 shared connection stopped answering CONNECTs (wedged); forcing a rebuild",
-			"consecutive_failures", n, "wedged_for", wedgedFor.Round(time.Second), "trip", tripReason(n >= p.maxConsecutiveFails))
+			"consecutive_failures", n, "wedged_for", wedgedFor.Round(time.Second),
+			"trip", tripReason(n >= p.maxConsecutiveFails), "last_error", errString(cause))
 		p.closeConn(clientConn)
 	}
+}
+
+// errString renders err for a log field, tolerating nil.
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // tripReason labels which wedge trip fired, for the rebuild log line.
@@ -377,13 +432,13 @@ func (p *L4Proxy) DialContext(ctx context.Context, target string) (net.Conn, err
 	req.Host = target
 	if err := stream.SendRequestHeader(req); err != nil {
 		closeL4Stream(stream)
-		p.noteConnFailure(clientConn, ctx)
+		p.noteConnFailure(clientConn, ctx, err)
 		return nil, err
 	}
 	response, err := stream.ReadResponse()
 	if err != nil {
 		closeL4Stream(stream)
-		p.noteConnFailure(clientConn, ctx)
+		p.noteConnFailure(clientConn, ctx, err)
 		return nil, err
 	}
 	// Cloudflare answered — a 2xx or a per-target rejection alike proves the shared

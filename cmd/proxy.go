@@ -1135,13 +1135,23 @@ func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint net.Addr, t
 			if config.AppConfig.Socks.AlwaysReconnect {
 				reconnectMode = "immediate"
 			}
-			slog.Warn(
-				"disconnected",
+			// uptime is the single most diagnostic field here: a drop near the
+			// Cloudflare idle window (~5m) is benign eviction, whereas repeated
+			// short-lived connections point at a real path/code problem. raw_error
+			// preserves the underlying message that `reason` collapses into a label.
+			attrs := []any{
 				"reason", reason,
 				"remote", remote,
 				"grace", drainGrace,
 				"reconnect", reconnectMode,
-			)
+			}
+			if !reconnectLog.ConnectedAt.IsZero() {
+				attrs = append(attrs, "uptime", time.Since(reconnectLog.ConnectedAt).Round(time.Second))
+			}
+			if err != nil {
+				attrs = append(attrs, "raw_error", err.Error())
+			}
+			slog.Warn("disconnected", attrs...)
 			socksRuntime.ScheduleDrain(err, drainGrace)
 		},
 	}

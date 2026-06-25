@@ -23,10 +23,35 @@ type tunnelTransport interface {
 	Close() error
 }
 
+// tunnelCloseCauser is the optional capability a transport implements to expose
+// the underlying QUIC connection's close cause. The tunnel layer type-asserts
+// for it on disconnect so a masked "use of closed network connection" forwarding
+// error can be replaced with the real QUIC reason (idle timeout, peer
+// CONNECTION_CLOSE code, transport error). HTTP/2 transports don't implement it.
+type tunnelCloseCauser interface {
+	CloseCause() error
+}
+
 type closeFunc func() error
 
 func (f closeFunc) Close() error {
 	return f()
+}
+
+// http3TunnelTransport pairs the HTTP/3 transport with its QUIC connection so the
+// connection's close cause is reachable after forwarding ends.
+type http3TunnelTransport struct {
+	*http3.Transport
+	conn *quic.Conn
+}
+
+// CloseCause returns the QUIC connection's context cancellation cause (the real
+// reason it closed), or nil while the connection is still alive.
+func (t *http3TunnelTransport) CloseCause() error {
+	if t == nil || t.conn == nil {
+		return nil
+	}
+	return context.Cause(t.conn.Context())
 }
 
 // PrepareTlsConfig creates a TLS configuration using the provided certificate and SNI (Server Name Indication).
@@ -165,7 +190,7 @@ func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.
 // connectTunnelHTTP3 performs a single QUIC+HTTP/3 connect-ip dial. It owns the
 // UDP socket it creates and closes it on every error path, so a failed attempt
 // never leaks a socket — the caller's cleanup only runs on the success path.
-func connectTunnelHTTP3(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.Config, template *uritemplate.Template, additionalHeaders http.Header, udpEndpoint *net.UDPAddr) (*net.UDPConn, *http3.Transport, *connectip.Conn, *http.Response, error) {
+func connectTunnelHTTP3(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.Config, template *uritemplate.Template, additionalHeaders http.Header, udpEndpoint *net.UDPAddr) (*net.UDPConn, tunnelTransport, *connectip.Conn, *http.Response, error) {
 	var udpConn *net.UDPConn
 	var err error
 	if udpEndpoint.IP.To4() == nil {
@@ -217,7 +242,9 @@ func connectTunnelHTTP3(ctx context.Context, tlsConfig *tls.Config, quicConfig *
 		return nil, nil, nil, nil, err
 	}
 
-	return udpConn, tr, ipConn, rsp, nil
+	// Return a transport that also carries the QUIC connection, so the tunnel
+	// layer can read its close cause on disconnect (see http3TunnelTransport).
+	return udpConn, &http3TunnelTransport{Transport: tr, conn: conn}, ipConn, rsp, nil
 }
 
 // isRetryableHTTP3ConnectFailure reports whether a connect-ip dial failed with a

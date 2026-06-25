@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand"
@@ -178,6 +179,7 @@ type ConnectionConfig struct {
 // TunnelReconnectLog tracks tunnel lifecycle for one-line reconnect logs.
 type TunnelReconnectLog struct {
 	HasConnectedOnce bool
+	ConnectedAt      time.Time // when the current connection was established (drives the uptime logged on disconnect)
 	DisconnectedAt   time.Time
 	Trigger          string // demand, backoff, or initial
 }
@@ -298,6 +300,7 @@ func handleConnectionWithForwarding(ctx context.Context, config ConnectionConfig
 	}
 	if config.ReconnectLog != nil {
 		config.ReconnectLog.HasConnectedOnce = true
+		config.ReconnectLog.ConnectedAt = time.Now()
 	}
 	if config.OnConnected != nil {
 		config.OnConnected()
@@ -314,10 +317,34 @@ func handleConnectionWithForwarding(ctx context.Context, config ConnectionConfig
 
 	select {
 	case err = <-forwardingErrCh:
+		// Replace a masked "connection closed" with the QUIC connection's real
+		// close cause so the disconnect log shows why Cloudflare/the path dropped
+		// the tunnel (idle timeout vs peer CONNECTION_CLOSE code vs transport error).
+		err = enrichWithTunnelCloseCause(err, tr)
 		return 0, err
 	case <-ctx.Done():
 		return 0, ctx.Err()
 	}
+}
+
+// enrichWithTunnelCloseCause prefers the QUIC connection's close cause over a
+// masked forwarding error (net.ErrClosed / "use of closed network connection"),
+// wrapping it so tunnelQUICDisconnectReason can classify the real reason. When
+// the connection is still alive (cause nil) or the transport exposes no cause
+// (HTTP/2), the original error is returned unchanged.
+func enrichWithTunnelCloseCause(err error, tr tunnelTransport) error {
+	if err == nil {
+		return nil
+	}
+	causer, ok := tr.(tunnelCloseCauser)
+	if !ok {
+		return err
+	}
+	cause := causer.CloseCause()
+	if cause == nil || errors.Is(cause, context.Canceled) {
+		return err
+	}
+	return fmt.Errorf("%w (forwarding: %v)", cause, err)
 }
 
 func tunnelTransportLabel(useHTTP2 bool) string {
@@ -367,6 +394,10 @@ func MaintainTunnel(ctx context.Context, config ConnectionConfig, device TunnelD
 				if werr := config.WaitForReconnectDemand(ctx); werr != nil {
 					return
 				}
+				// The idle tunnel was parked after Cloudflare evicted it; fresh
+				// outbound traffic just woke it. Log the transition so a lazy
+				// reconnect isn't silent between the disconnect and "reconnected".
+				slog.Info("tunnel reconnect triggered by outbound demand")
 				config.ReconnectStrategy.Reset()
 				continue
 			}

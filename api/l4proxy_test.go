@@ -321,7 +321,7 @@ func TestL4ProxyRebuildsOnConsecutiveConnFailures(t *testing.T) {
 	// microseconds, far under 2×connectTimeout, so the elapsed-time trip cannot fire here —
 	// this isolates the count trip.
 	for i := 0; i < int(p.maxConsecutiveFails)-1; i++ {
-		p.noteConnFailure(cc, ctx)
+		p.noteConnFailure(cc, ctx, errors.New("simulated CONNECT failure"))
 	}
 	if _, rc := p.Stats(); rc != 0 {
 		t.Fatalf("reconnects = %d below threshold, want 0", rc)
@@ -334,7 +334,7 @@ func TestL4ProxyRebuildsOnConsecutiveConnFailures(t *testing.T) {
 	}
 
 	// One more crosses the threshold → rebuild, and the run resets.
-	p.noteConnFailure(cc, ctx)
+	p.noteConnFailure(cc, ctx, errors.New("simulated CONNECT failure"))
 	if _, rc := p.Stats(); rc != 1 {
 		t.Fatalf("reconnects = %d at threshold, want 1", rc)
 	}
@@ -365,7 +365,7 @@ func TestL4ProxyRebuildsOnWedgeElapsed(t *testing.T) {
 	ctx := context.Background()
 
 	// First failure starts the run (stamps firstFailNanos); far below the count threshold.
-	p.noteConnFailure(cc, ctx)
+	p.noteConnFailure(cc, ctx, errors.New("simulated CONNECT failure"))
 	if _, rc := p.Stats(); rc != 0 {
 		t.Fatalf("reconnects = %d after one failure, want 0", rc)
 	}
@@ -373,7 +373,7 @@ func TestL4ProxyRebuildsOnWedgeElapsed(t *testing.T) {
 	// time, not count.
 	p.firstFailNanos.Store(time.Now().Add(-2*p.connectTimeout - time.Second).UnixNano())
 
-	p.noteConnFailure(cc, ctx)
+	p.noteConnFailure(cc, ctx, errors.New("simulated CONNECT failure"))
 	if got := p.consecutiveFails.Load(); got >= p.maxConsecutiveFails {
 		t.Fatalf("elapsed trip should fire BELOW the count threshold; consecutiveFails=%d threshold=%d", got, p.maxConsecutiveFails)
 	}
@@ -405,7 +405,7 @@ func TestL4ProxyConnFailureIgnoresStaleAndCancelled(t *testing.T) {
 	// Failures attributed to a DIFFERENT (already-replaced) connection are ignored.
 	stale := &http3.ClientConn{}
 	for i := 0; i < int(p.maxConsecutiveFails)*2; i++ {
-		p.noteConnFailure(stale, context.Background())
+		p.noteConnFailure(stale, context.Background(), errors.New("simulated CONNECT failure"))
 	}
 	if got := p.consecutiveFails.Load(); got != 0 {
 		t.Fatalf("stale-connection failures counted (%d); they must be ignored", got)
@@ -418,7 +418,7 @@ func TestL4ProxyConnFailureIgnoresStaleAndCancelled(t *testing.T) {
 	cancelledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
 	for i := 0; i < int(p.maxConsecutiveFails)*2; i++ {
-		p.noteConnFailure(cc, cancelledCtx)
+		p.noteConnFailure(cc, cancelledCtx, errors.New("simulated CONNECT failure"))
 	}
 	if got := p.consecutiveFails.Load(); got != 0 {
 		t.Fatalf("caller-cancelled dials counted (%d); they must be ignored", got)
