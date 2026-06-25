@@ -131,63 +131,6 @@ func TestHandleConnectionNoOnDisconnectedBeforeEstablished(t *testing.T) {
 	}
 }
 
-func TestHandleConnectionUsesEndpointSelectorPerAttempt(t *testing.T) {
-	oldConnectTunnelFunc := connectTunnelFunc
-	oldHandleForwardingFn := handleForwardingFn
-	defer func() {
-		connectTunnelFunc = oldConnectTunnelFunc
-		handleForwardingFn = oldHandleForwardingFn
-	}()
-
-	var dialed []string
-	connectTunnelFunc = func(
-		ctx context.Context,
-		tlsConfig *tls.Config,
-		quicConfig *quic.Config,
-		connectURI string,
-		endpoint net.Addr,
-		useHTTP2 bool,
-	) (*net.UDPConn, tunnelTransport, *connectip.Conn, *http.Response, error) {
-		udpEndpoint, ok := endpoint.(*net.UDPAddr)
-		if !ok {
-			t.Fatalf("expected UDP endpoint, got %T", endpoint)
-		}
-		dialed = append(dialed, udpEndpoint.IP.String())
-		return nil, nil, nil, &http.Response{StatusCode: http.StatusServiceUnavailable, Status: "503 Service Unavailable"}, nil
-	}
-
-	endpoints := []*net.UDPAddr{
-		{IP: net.ParseIP("1.1.1.1"), Port: 443},
-		{IP: net.ParseIP("1.1.1.2"), Port: 443},
-	}
-	selectorCalls := 0
-	cfg := ConnectionConfig{
-		TLSConfig:         &tls.Config{},
-		KeepAlivePeriod:   time.Second,
-		InitialPacketSize: 1242,
-		Endpoint:          &net.UDPAddr{IP: net.ParseIP("9.9.9.9"), Port: 443},
-		EndpointSelector: func() net.Addr {
-			picked := endpoints[selectorCalls%len(endpoints)]
-			selectorCalls++
-			return picked
-		},
-		MTU: 1280,
-	}
-
-	_, _ = handleConnection(context.Background(), cfg, noopTunnelDevice{}, 0)
-	_, _ = handleConnection(context.Background(), cfg, noopTunnelDevice{}, 1)
-
-	if selectorCalls != 2 {
-		t.Fatalf("expected selector to be called per attempt, got %d", selectorCalls)
-	}
-	if len(dialed) != 2 {
-		t.Fatalf("expected two dial attempts, got %d", len(dialed))
-	}
-	if dialed[0] != "1.1.1.1" || dialed[1] != "1.1.1.2" {
-		t.Fatalf("unexpected selected endpoints: %#v", dialed)
-	}
-}
-
 func TestHandleConnectionPassesHTTP2ModeAndTCPEndpoint(t *testing.T) {
 	oldConnectTunnelFunc := connectTunnelFunc
 	defer func() { connectTunnelFunc = oldConnectTunnelFunc }()

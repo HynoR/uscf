@@ -54,26 +54,21 @@ func (d Duration) Duration() time.Duration {
 // Config represents the application configuration structure, containing essential details such as keys, endpoints, and access tokens.
 type Config struct {
 	// 连接信息
-	PrivateKey        string   `json:"private_key"`         // Base64-encoded ECDSA private key
-	EndpointV4        string   `json:"endpoint_v4"`         // IPv4 address of the endpoint
-	EndpointV6        string   `json:"endpoint_v6"`         // IPv6 address of the endpoint
-	EndpointH2V4      string   `json:"endpoint_h2_v4"`      // IPv4 address used in HTTP/2 mode
-	EndpointH2V6      string   `json:"endpoint_h2_v6"`      // IPv6 address used in HTTP/2 mode
-	CustomEndpointsV4 []string `json:"custom_endpoints_v4"` // Optional IPv4 endpoint pool used by runtime
-	CustomEndpointsV6 []string `json:"custom_endpoints_v6"` // Optional IPv6 endpoint pool used by runtime
-	EndpointPubKey    string   `json:"endpoint_pub_key"`    // PEM-encoded ECDSA public key of the endpoint to verify against
-	License           string   `json:"license"`             // Application license key
-	ID                string   `json:"id"`                  // Device unique identifier
-	AccessToken       string   `json:"access_token"`        // Authentication token for API access
-	AccountMode       string   `json:"account_mode"`        // Account mode: free/premium/team
-	IPv4              string   `json:"ipv4"`                // Assigned IPv4 address
-	IPv6              string   `json:"ipv6"`                // Assigned IPv6 address
+	PrivateKey     string `json:"private_key"`      // Base64-encoded ECDSA private key
+	EndpointV4     string `json:"endpoint_v4"`      // IPv4 address of the endpoint
+	EndpointV6     string `json:"endpoint_v6"`      // IPv6 address of the endpoint
+	EndpointH2V4   string `json:"endpoint_h2_v4"`   // IPv4 address used in HTTP/2 mode
+	EndpointH2V6   string `json:"endpoint_h2_v6"`   // IPv6 address used in HTTP/2 mode
+	EndpointPubKey string `json:"endpoint_pub_key"` // PEM-encoded ECDSA public key of the endpoint to verify against
+	License        string `json:"license"`          // Application license key
+	ID             string `json:"id"`               // Device unique identifier
+	AccessToken    string `json:"access_token"`     // Authentication token for API access
+	AccountMode    string `json:"account_mode"`     // Account mode: free/premium/team
+	IPv4           string `json:"ipv4"`             // Assigned IPv4 address
+	IPv6           string `json:"ipv6"`             // Assigned IPv6 address
 
 	// SOCKS代理配置
 	Socks SocksConfig `json:"socks"` // SOCKS5代理相关配置
-
-	// SSH SOCKS5网关配置
-	SSHSocks SSHSocksConfig `json:"ssh_socks"` // SSH SOCKS5网关相关配置
 
 	// 注册信息
 	Registration RegistrationInfo `json:"registration"` // 注册相关信息
@@ -87,6 +82,8 @@ type KeyConfig struct {
 	PrivateKey     string `json:"private_key"`
 	EndpointV4     string `json:"endpoint_v4"`
 	EndpointV6     string `json:"endpoint_v6"`
+	EndpointH2V4   string `json:"endpoint_h2_v4"`
+	EndpointH2V6   string `json:"endpoint_h2_v6"`
 	EndpointPubKey string `json:"endpoint_pub_key"`
 	AccountMode    string `json:"account_mode"`
 	License        string `json:"license"`
@@ -98,14 +95,9 @@ type KeyConfig struct {
 
 // PublicConfig 包含可复用的通用运行配置，存储于 config.json。
 type PublicConfig struct {
-	EndpointH2V4      string           `json:"endpoint_h2_v4"`
-	EndpointH2V6      string           `json:"endpoint_h2_v6"`
-	CustomEndpointsV4 []string         `json:"custom_endpoints_v4"`
-	CustomEndpointsV6 []string         `json:"custom_endpoints_v6"`
-	Socks             SocksConfig      `json:"socks"`
-	SSHSocks          SSHSocksConfig   `json:"ssh_socks"`
-	Registration      RegistrationInfo `json:"registration"`
-	Logging           LoggingConfig    `json:"logging"`
+	Socks        SocksConfig      `json:"socks"`
+	Registration RegistrationInfo `json:"registration"`
+	Logging      LoggingConfig    `json:"logging"`
 }
 
 // legacyConfig 兼容读取旧版单文件 config.json（包含 key 字段 + 公共字段）。
@@ -214,32 +206,6 @@ const (
 	DefaultL4MaxConnFailures = 50
 )
 
-// SSHSocksConfig 包含SSH SOCKS5网关相关的配置
-type SSHSocksConfig struct {
-	BindAddress       string   `json:"bind_address"`       // 代理绑定的地址
-	Port              string   `json:"port"`               // 代理监听的端口
-	Username          string   `json:"username"`           // 代理认证的用户名
-	Password          string   `json:"password"`           // 代理认证的密码
-	HourlyThreshold   int      `json:"hourly_threshold"`   // 每小时同一IP连接次数阈值，超过则锁定/24子网，默认15
-	Whitelist         []string `json:"whitelist"`          // 白名单，host或IP，命中后不参与计数器统计
-	ConnectionTimeout Duration `json:"connection_timeout"` // 建立连接的超时时间
-	IdleTimeout       Duration `json:"idle_timeout"`       // 空闲连接的超时时间
-}
-
-// GetDefaultSSHSocksConfig 返回默认的SSH SOCKS5网关配置
-func GetDefaultSSHSocksConfig() SSHSocksConfig {
-	return SSHSocksConfig{
-		BindAddress:       "0.0.0.0",
-		Port:              "1080",
-		Username:          "",
-		Password:          "",
-		HourlyThreshold:   15,
-		Whitelist:         []string{},
-		ConnectionTimeout: Duration(30 * time.Second),
-		IdleTimeout:       Duration(5 * time.Minute),
-	}
-}
-
 // LoggingConfig 包含日志相关的配置
 type LoggingConfig struct {
 	Level        string `json:"level"`         // 日志级别: debug/info/warn/error
@@ -281,14 +247,9 @@ func LoadConfig(configPath string) error {
 	}
 
 	AppConfig = Config{
-		EndpointH2V4:      legacy.EndpointH2V4,
-		EndpointH2V6:      legacy.EndpointH2V6,
-		CustomEndpointsV4: append([]string(nil), legacy.CustomEndpointsV4...),
-		CustomEndpointsV6: append([]string(nil), legacy.CustomEndpointsV6...),
-		Socks:             legacy.Socks,
-		SSHSocks:          legacy.SSHSocks,
-		Registration:      legacy.Registration,
-		Logging:           legacy.Logging,
+		Socks:        legacy.Socks,
+		Registration: legacy.Registration,
+		Logging:      legacy.Logging,
 	}
 	applyKeyConfig(&AppConfig, legacy.KeyConfig)
 
@@ -326,12 +287,6 @@ func LoadConfig(configPath string) error {
 		return err
 	}
 
-	// 如果SSHSocks配置为空，设置默认值
-	if AppConfig.SSHSocks.Port == "" && AppConfig.SSHSocks.BindAddress == "" {
-		AppConfig.SSHSocks = GetDefaultSSHSocksConfig()
-	}
-	AppConfig.SSHSocks = NormalizeSSHSocksConfig(AppConfig.SSHSocks)
-
 	defaultLogging := GetDefaultLoggingConfig()
 	if strings.TrimSpace(AppConfig.Logging.Level) == "" {
 		AppConfig.Logging.Level = defaultLogging.Level
@@ -358,14 +313,9 @@ func LoadPublicConfig(configPath string) error {
 	}
 
 	AppConfig = Config{
-		EndpointH2V4:      public.EndpointH2V4,
-		EndpointH2V6:      public.EndpointH2V6,
-		CustomEndpointsV4: append([]string(nil), public.CustomEndpointsV4...),
-		CustomEndpointsV6: append([]string(nil), public.CustomEndpointsV6...),
-		Socks:             public.Socks,
-		SSHSocks:          public.SSHSocks,
-		Registration:      public.Registration,
-		Logging:           public.Logging,
+		Socks:        public.Socks,
+		Registration: public.Registration,
+		Logging:      public.Logging,
 	}
 
 	if AppConfig.Socks.Port == "" && AppConfig.Socks.BindAddress == "" && len(AppConfig.Socks.DNS) == 0 {
@@ -376,12 +326,6 @@ func LoadPublicConfig(configPath string) error {
 		return normErr
 	}
 	AppConfig.Socks = normalizedSocks
-
-	// 如果SSHSocks配置为空，设置默认值
-	if AppConfig.SSHSocks.Port == "" && AppConfig.SSHSocks.BindAddress == "" {
-		AppConfig.SSHSocks = GetDefaultSSHSocksConfig()
-	}
-	AppConfig.SSHSocks = NormalizeSSHSocksConfig(AppConfig.SSHSocks)
 
 	defaultLogging := GetDefaultLoggingConfig()
 	if strings.TrimSpace(AppConfig.Logging.Level) == "" {
@@ -447,25 +391,6 @@ func GetDefaultLoggingConfig() LoggingConfig {
 		Format:       "text",
 		SocksVerbose: false,
 	}
-}
-
-// NormalizeSSHSocksConfig 规范化SSH SOCKS5网关配置。
-func NormalizeSSHSocksConfig(cfg SSHSocksConfig) SSHSocksConfig {
-	normalized := cfg
-	defaults := GetDefaultSSHSocksConfig()
-	if normalized.HourlyThreshold <= 0 {
-		normalized.HourlyThreshold = defaults.HourlyThreshold
-	}
-	if normalized.Whitelist == nil {
-		normalized.Whitelist = []string{}
-	}
-	if normalized.ConnectionTimeout.Duration() <= 0 {
-		normalized.ConnectionTimeout = defaults.ConnectionTimeout
-	}
-	if normalized.IdleTimeout.Duration() <= 0 {
-		normalized.IdleTimeout = defaults.IdleTimeout
-	}
-	return normalized
 }
 
 // NormalizeLoggingConfig 规范化日志配置，并返回无效配置项说明。
@@ -619,6 +544,8 @@ func extractKeyConfig(cfg Config) KeyConfig {
 		PrivateKey:     cfg.PrivateKey,
 		EndpointV4:     cfg.EndpointV4,
 		EndpointV6:     cfg.EndpointV6,
+		EndpointH2V4:   cfg.EndpointH2V4,
+		EndpointH2V6:   cfg.EndpointH2V6,
 		EndpointPubKey: cfg.EndpointPubKey,
 		AccountMode:    cfg.AccountMode,
 		License:        cfg.License,
@@ -631,14 +558,9 @@ func extractKeyConfig(cfg Config) KeyConfig {
 
 func extractPublicConfig(cfg Config) PublicConfig {
 	return PublicConfig{
-		EndpointH2V4:      cfg.EndpointH2V4,
-		EndpointH2V6:      cfg.EndpointH2V6,
-		CustomEndpointsV4: append([]string(nil), cfg.CustomEndpointsV4...),
-		CustomEndpointsV6: append([]string(nil), cfg.CustomEndpointsV6...),
-		Socks:             cfg.Socks,
-		SSHSocks:          cfg.SSHSocks,
-		Registration:      cfg.Registration,
-		Logging:           cfg.Logging,
+		Socks:        cfg.Socks,
+		Registration: cfg.Registration,
+		Logging:      cfg.Logging,
 	}
 }
 
@@ -646,6 +568,8 @@ func applyKeyConfig(cfg *Config, key KeyConfig) {
 	cfg.PrivateKey = key.PrivateKey
 	cfg.EndpointV4 = key.EndpointV4
 	cfg.EndpointV6 = key.EndpointV6
+	cfg.EndpointH2V4 = key.EndpointH2V4
+	cfg.EndpointH2V6 = key.EndpointH2V6
 	cfg.EndpointPubKey = key.EndpointPubKey
 	cfg.AccountMode = key.AccountMode
 	cfg.License = key.License

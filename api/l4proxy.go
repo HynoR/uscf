@@ -61,13 +61,8 @@ const (
 type L4ProxyConfig struct {
 	TLSConfig  *tls.Config
 	QUICConfig *quic.Config
-	// Endpoint is the fallback HTTP/3 UDP endpoint used when EndpointSelector is
-	// nil or returns nothing.
+	// Endpoint is the HTTP/3 UDP endpoint the shared QUIC connection dials.
 	Endpoint *net.UDPAddr
-	// EndpointSelector, when set, is consulted on every (re)connect so the proxy can
-	// rotate across a custom endpoint pool, mirroring the L3 tunnel's EndpointSelector.
-	// It must return a *net.UDPAddr; anything else is ignored in favour of Endpoint.
-	EndpointSelector func() net.Addr
 	// ConnectTimeout bounds establishing the shared QUIC connection (and clamps the
 	// per-dial stream-open attempt).
 	ConnectTimeout time.Duration
@@ -85,7 +80,6 @@ type L4Proxy struct {
 	tlsConfig         *tls.Config
 	quicConfig        *quic.Config
 	endpoint          *net.UDPAddr
-	endpointSelector  func() net.Addr
 	connectTimeout    time.Duration
 	streamOpenTimeout time.Duration
 
@@ -140,7 +134,6 @@ func NewL4Proxy(cfg L4ProxyConfig) (*L4Proxy, error) {
 		tlsConfig:           cfg.TLSConfig,
 		quicConfig:          cfg.QUICConfig,
 		endpoint:            cfg.Endpoint,
-		endpointSelector:    cfg.EndpointSelector,
 		connectTimeout:      cfg.ConnectTimeout,
 		streamOpenTimeout:   streamOpenTimeout,
 		maxConsecutiveFails: int64(maxConsecutiveFails),
@@ -204,7 +197,7 @@ func (p *L4Proxy) dialConn(ctx context.Context) (*http3.ClientConn, error) {
 	}
 	p.mu.Unlock()
 
-	endpoint := p.selectEndpoint()
+	endpoint := p.endpoint
 	dialCtx, cancel := context.WithTimeout(ctx, p.connectTimeout)
 	defer cancel()
 
@@ -410,17 +403,6 @@ func (p *L4Proxy) DialContext(ctx context.Context, target string) (net.Conn, err
 	conn := &l4TCPConn{stream: stream, local: p.localAddr(), remote: l4Addr(target)}
 	conn.onClose = func() { p.inFlight.Add(-1) }
 	return conn, nil
-}
-
-func (p *L4Proxy) selectEndpoint() *net.UDPAddr {
-	if p.endpointSelector != nil {
-		if selected := p.endpointSelector(); selected != nil {
-			if udp, ok := selected.(*net.UDPAddr); ok && udp != nil {
-				return udp
-			}
-		}
-	}
-	return p.endpoint
 }
 
 // l4StatusError is a per-target CONNECT rejection (valid non-2xx response). The shared

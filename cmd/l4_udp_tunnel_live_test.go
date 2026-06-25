@@ -91,16 +91,15 @@ func TestL4TunnelUDPLive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tls config: %v", err)
 	}
-	endpoint, selector, err := selectL4Endpoint()
+	endpoint, err := selectL4Endpoint()
 	if err != nil {
 		t.Fatalf("select endpoint: %v", err)
 	}
 	l4Proxy, err := api.NewL4Proxy(api.L4ProxyConfig{
-		TLSConfig:        tlsConfig,
-		QUICConfig:       l4QUICConfig(socks.KeepalivePeriod.Duration(), socks.InitialPacketSize),
-		Endpoint:         endpoint,
-		EndpointSelector: selector,
-		ConnectTimeout:   10 * time.Second,
+		TLSConfig:      tlsConfig,
+		QUICConfig:     l4QUICConfig(socks.KeepalivePeriod.Duration(), socks.InitialPacketSize),
+		Endpoint:       endpoint,
+		ConnectTimeout: 10 * time.Second,
 	})
 	if err != nil {
 		t.Fatalf("new l4 proxy: %v", err)

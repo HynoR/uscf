@@ -94,7 +94,7 @@ func setupAndRunL4Proxy(cmd *cobra.Command, overrides []string, configSaved bool
 		return err
 	}
 
-	endpoint, endpointSelector, err := selectL4Endpoint()
+	endpoint, err := selectL4Endpoint()
 	if err != nil {
 		return err
 	}
@@ -105,7 +105,6 @@ func setupAndRunL4Proxy(cmd *cobra.Command, overrides []string, configSaved bool
 		TLSConfig:                  tlsConfig,
 		QUICConfig:                 l4QUICConfig(config.AppConfig.Socks.KeepalivePeriod.Duration(), config.AppConfig.Socks.InitialPacketSize),
 		Endpoint:                   endpoint,
-		EndpointSelector:           endpointSelector,
 		ConnectTimeout:             connectionTimeout,
 		MaxConsecutiveConnFailures: config.AppConfig.Socks.L4MaxConnFailures,
 	})
@@ -164,7 +163,6 @@ func setupAndRunL4Proxy(cmd *cobra.Command, overrides []string, configSaved bool
 
 	readyInfo := proxyReadyInfo{
 		endpoint:          endpoint,
-		endpointSelector:  endpointSelector,
 		transport:         "l4",
 		connectionTimeout: connectionTimeout,
 		overrides:         overrides,
@@ -200,20 +198,20 @@ func prepareL4TlsConfig() (*tls.Config, error) {
 }
 
 // selectL4Endpoint reuses the L3 endpoint selection (same Cloudflare MASQUE
-// endpoint IPs and custom endpoint pool) but forces the HTTP/3 UDP path.
-func selectL4Endpoint() (*net.UDPAddr, func() net.Addr, error) {
+// endpoint IPs) but forces the HTTP/3 UDP path.
+func selectL4Endpoint() (*net.UDPAddr, error) {
 	connectPort := config.AppConfig.Socks.ConnectPort
 	useIPv6 := config.AppConfig.Socks.UseIPv6
 
-	endpoint, selector, err := selectMasqueEndpoint(connectPort, useIPv6, false)
+	endpoint, err := selectMasqueEndpoint(connectPort, useIPv6, false)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to select L4 endpoint: %w", err)
+		return nil, fmt.Errorf("failed to select L4 endpoint: %w", err)
 	}
 	udp, ok := endpoint.(*net.UDPAddr)
 	if !ok {
-		return nil, nil, fmt.Errorf("l4 mode requires a UDP endpoint, got %T", endpoint)
+		return nil, fmt.Errorf("l4 mode requires a UDP endpoint, got %T", endpoint)
 	}
-	return udp, selector, nil
+	return udp, nil
 }
 
 // l4QUICConfig builds the QUIC config for the shared L4 connection. Large

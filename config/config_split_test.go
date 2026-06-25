@@ -21,8 +21,6 @@ func TestLoadConfig_DualFileMerge(t *testing.T) {
 	keyPath := filepath.Join(dir, "key.json")
 
 	publicContent := `{
-  "custom_endpoints_v4": ["162.159.1.1"],
-  "custom_endpoints_v6": ["2606:4700::1111"],
   "socks": {
     "bind_address": "127.0.0.1",
     "port": "1080",
@@ -200,17 +198,16 @@ func TestSaveConfig_WritesPublicAndKeySeparately(t *testing.T) {
 	keyPath := filepath.Join(dir, "key.json")
 
 	AppConfig = Config{
-		PrivateKey:        "PK",
-		EndpointV4:        "162.159.199.1",
-		EndpointV6:        "2606:4700:104::1",
-		EndpointPubKey:    "PUB",
-		AccountMode:       "free",
-		License:           "LICENSE-1",
-		ID:                "id-1",
-		AccessToken:       "token-1",
-		IPv4:              "172.16.0.2",
-		IPv6:              "2606:4700:110::2",
-		CustomEndpointsV4: []string{"162.159.1.1"},
+		PrivateKey:     "PK",
+		EndpointV4:     "162.159.199.1",
+		EndpointV6:     "2606:4700:104::1",
+		EndpointPubKey: "PUB",
+		AccountMode:    "free",
+		License:        "LICENSE-1",
+		ID:             "id-1",
+		AccessToken:    "token-1",
+		IPv4:           "172.16.0.2",
+		IPv6:           "2606:4700:110::2",
 		Socks: SocksConfig{
 			BindAddress: "127.0.0.1",
 			Port:        "1080",

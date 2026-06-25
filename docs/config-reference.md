@@ -48,9 +48,7 @@ These fields only affect `uscf proxy`. WG mode runs `uscf socks`, so it logs and
 
 | Field | Purpose |
 |---|---|
-| `endpoint_h2_v4` / `endpoint_h2_v6` | Optional HTTP/2 TCP fallback endpoints. IPv4 defaults to `162.159.198.2` when empty; IPv6 must be set explicitly when `socks.http2` and `socks.use_ipv6` are both true. |
-| `custom_endpoints_v4` / `custom_endpoints_v6` | Optional HTTP/3 MASQUE endpoint pools. If valid entries exist for the selected IP family, one is chosen randomly on reconnect. Not used by HTTP/2 mode. |
-| `socks.use_ipv6` | Use IPv6 endpoint and custom IPv6 endpoint pool for MASQUE connection. |
+| `socks.use_ipv6` | Use the IPv6 endpoint for the MASQUE connection. |
 | `socks.http2` | Use TCP+TLS+HTTP/2 for the MASQUE connection instead of QUIC+HTTP/3. CLI override: `uscf proxy --http2`. |
 | `socks.l4` | Use L4 mode: tunnel each TCP flow as an HTTP/3 CONNECT stream over a **single shared QUIC connection**, bypassing the userspace netstack. Faster and lighter, but **TCP-only** (Cloudflare's MASQUE proxy endpoint refuses `connect-udp` with HTTP 403) and DNS is always resolved locally (`remote_dns` ignored). The connection model follows mihomo's validated MASQUE proxy: the connection is cached and reused for every flow, and is rebuilt **only** when opening a request stream fails — which covers a dead connection (Cloudflare idle eviction / path failure) and a saturated one (peer `MAX_STREAMS` reached). One connection is one stable WARP egress identity, like L3; there is deliberately **no connection pool and no in-flight stream cap** (those were removed — a pool fragments the egress IP and a hard cap locked the proxy at the ceiling instead of rebuilding). The live open-stream count and cumulative connection rebuilds are logged every 30s (at `debug`, or `info` on any interval where the connection was rebuilt). Mutually exclusive with `http2`. CLI override: `uscf proxy --l4`. |
 | `socks.l4_half_open_timeout` | L4 only. How long a half-open TCP relay's surviving direction may stay **idle** before it is reclaimed, once the other direction has finished. It re-arms on activity, so an active/slow-but-streaming response is never cut — only a truly idle half-open flow is reaped. This keeps a finished/abandoned flow from pinning its QUIC stream (against `MAX_STREAMS`) for the full `l4_idle_timeout`. Default `30s`; `<=0` uses the default. Because the reaper only ever *shortens* the surviving direction's idle, a value greater than `l4_idle_timeout` is clamped down to it. |
@@ -71,7 +69,6 @@ These fields only affect `uscf proxy`. WG mode runs `uscf socks`, so it logs and
 | `socks.reconnect_delay` | Initial reconnect delay. |
 | `socks.max_reconnect_attempts` | Pause after this many consecutive failures. `0` means unlimited retry. |
 | `socks.drain_grace` | Keep existing SOCKS connections open during short tunnel outages; if the tunnel is still down after this duration, active SOCKS connections are drained. |
-| `socks.self_check` | Periodically checks tunnel health and triggers reconnect after repeated failures. |
 
 ## Split Routing
 
@@ -98,6 +95,7 @@ Use `bypass_domain` when only a few domains should avoid the tunnel. Use `proxy_
 |---|---|
 | `private_key` | MASQUE ECDSA private key |
 | `endpoint_v4` / `endpoint_v6` | Cloudflare MASQUE HTTP/3 endpoint hosts |
+| `endpoint_h2_v4` / `endpoint_h2_v6` | HTTP/2 TCP fallback endpoints (used when `socks.http2` is on). IPv4 defaults to `162.159.198.2` when empty; IPv6 must be set explicitly when `socks.http2` and `socks.use_ipv6` are both true. |
 | `endpoint_pub_key` | Endpoint public key used for pinning |
 | `account_mode` | `free`, `premium`, or `team` |
 | `license` | Account license value returned by Cloudflare |

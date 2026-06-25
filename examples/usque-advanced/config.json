@@ -1,8 +1,4 @@
 {
-  "endpoint_h2_v4": "162.159.198.2",
-  "endpoint_h2_v6": "",
-  "custom_endpoints_v4": [],
-  "custom_endpoints_v6": [],
   "socks": {
     "bind_address": "0.0.0.0",
     "port": "1080",
@@ -32,8 +28,7 @@
     "max_reconnect_attempts": 0,
     "drain_grace": "15s",
     "connection_timeout": "30s",
-    "idle_timeout": "5m",
-    "self_check": false
+    "idle_timeout": "5m"
   },
   "logging": {
     "level": "info",

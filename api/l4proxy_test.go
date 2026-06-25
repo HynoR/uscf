@@ -161,35 +161,6 @@ func TestNewL4ProxyValidation(t *testing.T) {
 	}
 }
 
-func TestL4ProxySelectEndpoint(t *testing.T) {
-	fallback := &net.UDPAddr{IP: net.IPv4(2, 2, 2, 2), Port: 443}
-	p := &L4Proxy{endpoint: fallback}
-
-	// No selector -> fallback.
-	if got := p.selectEndpoint(); got != fallback {
-		t.Fatalf("no selector: got %v, want fallback", got)
-	}
-
-	// Selector returning a UDP addr -> that addr.
-	chosen := &net.UDPAddr{IP: net.IPv4(3, 3, 3, 3), Port: 443}
-	p.endpointSelector = func() net.Addr { return chosen }
-	if got := p.selectEndpoint(); got != chosen {
-		t.Fatalf("udp selector: got %v, want chosen", got)
-	}
-
-	// Selector returning nil -> fallback.
-	p.endpointSelector = func() net.Addr { return nil }
-	if got := p.selectEndpoint(); got != fallback {
-		t.Fatalf("nil selector: got %v, want fallback", got)
-	}
-
-	// Selector returning a non-UDP addr -> fallback (defensive).
-	p.endpointSelector = func() net.Addr { return &net.TCPAddr{IP: net.IPv4(4, 4, 4, 4), Port: 443} }
-	if got := p.selectEndpoint(); got != fallback {
-		t.Fatalf("tcp selector: got %v, want fallback", got)
-	}
-}
-
 func TestListenUDPForEndpoint(t *testing.T) {
 	// The exact family of a wildcard local bind is OS-dependent; assert only that
 	// each endpoint family yields a usable UDP socket.

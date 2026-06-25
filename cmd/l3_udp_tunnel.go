@@ -121,7 +121,7 @@ func startL3UDPTunnel(cmd *cobra.Command, connectionTimeout, idleTimeout time.Du
 		return nil, nil, err
 	}
 
-	endpoint, endpointSelector, localAddresses, dnsAddrs, err := prepareNetworkConfig(cmd)
+	endpoint, localAddresses, dnsAddrs, err := prepareNetworkConfig(cmd)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -155,7 +155,6 @@ func startL3UDPTunnel(cmd *cobra.Command, connectionTimeout, idleTimeout time.Du
 		KeepAlivePeriod:   0,
 		InitialPacketSize: config.AppConfig.Socks.InitialPacketSize,
 		Endpoint:          endpoint,
-		EndpointSelector:  endpointSelector,
 		UseHTTP2:          false,
 		MTU:               config.AppConfig.Socks.MTU,
 		// Force lazy reconnect regardless of socks.always_reconnect: the UDP leg must

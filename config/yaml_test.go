@@ -25,9 +25,7 @@ func TestLoadConfig_ReadsYAML(t *testing.T) {
 	configPath := filepath.Join(dir, "config.yaml")
 	keyPath := filepath.Join(dir, "key.json")
 
-	yamlContent := `custom_endpoints_v4:
-  - 162.159.1.1
-socks:
+	yamlContent := `socks:
   bind_address: 127.0.0.1
   port: "1080"
   dns:

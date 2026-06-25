@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math/rand"
 	"net"
 	"net/netip"
 	"os"
@@ -797,13 +796,13 @@ func tcpAddrFromHost(host string, port int, useIPv6 bool) (*net.TCPAddr, error) 
 	return &net.TCPAddr{IP: ip, Port: port}, nil
 }
 
-func selectMasqueEndpoint(port int, useIPv6 bool, useHTTP2 bool) (net.Addr, func() net.Addr, error) {
+func selectMasqueEndpoint(port int, useIPv6 bool, useHTTP2 bool) (net.Addr, error) {
 	if useHTTP2 {
 		h2Host := strings.TrimSpace(config.AppConfig.EndpointH2V4)
 		if useIPv6 {
 			h2Host = strings.TrimSpace(config.AppConfig.EndpointH2V6)
 			if h2Host == "" {
-				return nil, nil, fmt.Errorf("http2 with use_ipv6 requires endpoint_h2_v6")
+				return nil, fmt.Errorf("http2 with use_ipv6 requires endpoint_h2_v6")
 			}
 		} else if h2Host == "" {
 			h2Host = config.DefaultEndpointH2V4
@@ -811,81 +810,18 @@ func selectMasqueEndpoint(port int, useIPv6 bool, useHTTP2 bool) (net.Addr, func
 
 		endpoint, err := tcpAddrFromHost(h2Host, port, useIPv6)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		slog.Info("HTTP/2 TCP fallback enabled", "endpoint", endpoint.String(), "family", familyLabel(useIPv6))
-		return endpoint, nil, nil
+		return endpoint, nil
 	}
 
 	fallbackHost := config.AppConfig.EndpointV4
-	customHosts := config.AppConfig.CustomEndpointsV4
 	if useIPv6 {
 		fallbackHost = config.AppConfig.EndpointV6
-		customHosts = config.AppConfig.CustomEndpointsV6
 	}
 
-	fallbackEndpoint, err := udpAddrFromHost(fallbackHost, port, useIPv6)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	candidateEndpoints := buildCustomEndpointPool(customHosts, port, useIPv6)
-	if len(candidateEndpoints) > 0 {
-		slog.Info("custom endpoint pool enabled", "family", familyLabel(useIPv6), "count", len(candidateEndpoints))
-		return fallbackEndpoint, newEndpointSelector(candidateEndpoints), nil
-	}
-	if len(customHosts) > 0 {
-		slog.Warn("custom endpoint list configured but no valid entries; using fallback endpoint", "family", familyLabel(useIPv6))
-	}
-
-	return fallbackEndpoint, nil, nil
-}
-
-func buildCustomEndpointPool(customHosts []string, port int, useIPv6 bool) []*net.UDPAddr {
-	candidates := make([]*net.UDPAddr, 0, len(customHosts))
-	seen := make(map[string]struct{})
-	for _, raw := range customHosts {
-		raw = strings.TrimSpace(raw)
-		if raw == "" {
-			continue
-		}
-
-		addr, err := udpAddrFromHost(raw, port, useIPv6)
-		if err != nil {
-			slog.Warn("ignoring invalid custom endpoint", "endpoint", raw, "error", err)
-			continue
-		}
-
-		key := addr.IP.String()
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		candidates = append(candidates, addr)
-	}
-
-	return candidates
-}
-
-func newEndpointSelector(candidates []*net.UDPAddr) func() net.Addr {
-	if len(candidates) == 0 {
-		return nil
-	}
-
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-	var mu sync.Mutex
-
-	return func() net.Addr {
-		mu.Lock()
-		idx := rng.Intn(len(candidates))
-		selected := candidates[idx]
-		mu.Unlock()
-
-		return &net.UDPAddr{
-			IP:   append(net.IP(nil), selected.IP...),
-			Port: selected.Port,
-		}
-	}
+	return udpAddrFromHost(fallbackHost, port, useIPv6)
 }
 
 func familyLabel(useIPv6 bool) string {
@@ -951,7 +887,6 @@ type socksRuntimeMeta struct {
 
 type proxyReadyInfo struct {
 	endpoint          net.Addr
-	endpointSelector  func() net.Addr
 	useHTTP2          bool
 	transport         string // explicit transport label (e.g. "l4"); empty derives from useHTTP2
 	connectionTimeout time.Duration
@@ -975,7 +910,7 @@ func setupAndRunSocksProxy(cmd *cobra.Command, overrides []string, configSaved b
 	}
 
 	// 准备网络配置
-	endpoint, endpointSelector, localAddresses, dnsAddrs, err := prepareNetworkConfig(cmd)
+	endpoint, localAddresses, dnsAddrs, err := prepareNetworkConfig(cmd)
 	if err != nil {
 		return err
 	}
@@ -995,12 +930,11 @@ func setupAndRunSocksProxy(cmd *cobra.Command, overrides []string, configSaved b
 		return err
 	}
 
-	readyCh := startTunnel(cmd, tlsConfig, endpoint, endpointSelector, tunDev, tunNet, socksRuntime)
+	readyCh := startTunnel(cmd, tlsConfig, endpoint, tunDev, tunNet, socksRuntime)
 	<-readyCh
 
 	readyInfo := proxyReadyInfo{
 		endpoint:          endpoint,
-		endpointSelector:  endpointSelector,
 		useHTTP2:          config.AppConfig.Socks.HTTP2,
 		connectionTimeout: connectionTimeout,
 		overrides:         overrides,
@@ -1040,15 +974,15 @@ func prepareTlsConfig(cmd *cobra.Command) (*tls.Config, error) {
 }
 
 // prepareNetworkConfig 准备网络配置
-func prepareNetworkConfig(cmd *cobra.Command) (net.Addr, func() net.Addr, []netip.Addr, []netip.Addr, error) {
+func prepareNetworkConfig(cmd *cobra.Command) (net.Addr, []netip.Addr, []netip.Addr, error) {
 	// 从配置文件获取连接端口
 	connectPort := config.AppConfig.Socks.ConnectPort
 
 	useIPv6 := config.AppConfig.Socks.UseIPv6
 	useHTTP2 := config.AppConfig.Socks.HTTP2
-	fallbackEndpoint, endpointSelector, err := selectMasqueEndpoint(connectPort, useIPv6, useHTTP2)
+	endpoint, err := selectMasqueEndpoint(connectPort, useIPv6, useHTTP2)
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("failed to parse fallback endpoint: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to parse endpoint: %w", err)
 	}
 
 	// 隧道内IP设置
@@ -1056,14 +990,14 @@ func prepareNetworkConfig(cmd *cobra.Command) (net.Addr, func() net.Addr, []neti
 	if !config.AppConfig.Socks.NoTunnelIPv4 {
 		v4, err := netip.ParseAddr(config.AppConfig.IPv4)
 		if err != nil {
-			return nil, nil, nil, nil, fmt.Errorf("Failed to parse IPv4 address: %v", err)
+			return nil, nil, nil, fmt.Errorf("Failed to parse IPv4 address: %v", err)
 		}
 		localAddresses = append(localAddresses, v4)
 	}
 	if !config.AppConfig.Socks.NoTunnelIPv6 {
 		v6, err := netip.ParseAddr(config.AppConfig.IPv6)
 		if err != nil {
-			return nil, nil, nil, nil, fmt.Errorf("Failed to parse IPv6 address: %v", err)
+			return nil, nil, nil, fmt.Errorf("Failed to parse IPv6 address: %v", err)
 		}
 		localAddresses = append(localAddresses, v6)
 	}
@@ -1073,12 +1007,12 @@ func prepareNetworkConfig(cmd *cobra.Command) (net.Addr, func() net.Addr, []neti
 	for _, dns := range config.AppConfig.Socks.DNS {
 		addr, err := netip.ParseAddr(dns)
 		if err != nil {
-			return nil, nil, nil, nil, fmt.Errorf("Failed to parse DNS server: %v", err)
+			return nil, nil, nil, fmt.Errorf("Failed to parse DNS server: %v", err)
 		}
 		dnsAddrs = append(dnsAddrs, addr)
 	}
 
-	return fallbackEndpoint, endpointSelector, localAddresses, dnsAddrs, nil
+	return endpoint, localAddresses, dnsAddrs, nil
 }
 
 // getTimeoutSettings 获取超时设置
@@ -1128,7 +1062,7 @@ func createTunDevice(localAddresses, dnsAddrs []netip.Addr, cmd *cobra.Command) 
 }
 
 // startTunnel 配置并启动隧道连接
-func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint net.Addr, endpointSelector func() net.Addr, tunDev tun.Device, tunNet *netstack.Net, socksRuntime *socksRuntime) <-chan struct{} {
+func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint net.Addr, tunDev tun.Device, tunNet *netstack.Net, socksRuntime *socksRuntime) <-chan struct{} {
 	readyCh := make(chan struct{})
 	var readyOnce sync.Once
 	writeTunnelStateSafe(tunnelStateDown)
@@ -1147,7 +1081,6 @@ func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint net.Addr, e
 		KeepAlivePeriod:        keepalivePeriod,
 		InitialPacketSize:      initialPacketSize,
 		Endpoint:               endpoint,
-		EndpointSelector:       endpointSelector,
 		UseHTTP2:               config.AppConfig.Socks.HTTP2,
 		MTU:                    mtu,
 		MaxReconnectAttempts:   maxReconnectAttempts,
@@ -1336,12 +1269,7 @@ func resolvedTransportLabel(info proxyReadyInfo) string {
 	return proxyTransportLabel(info.useHTTP2)
 }
 
-func selectedProxyEndpoint(endpoint net.Addr, selector func() net.Addr) string {
-	if selector != nil {
-		if selected := selector(); selected != nil {
-			return selected.String()
-		}
-	}
+func selectedProxyEndpoint(endpoint net.Addr) string {
 	if endpoint != nil {
 		return endpoint.String()
 	}
@@ -1358,7 +1286,7 @@ func logProxyReady(listenerAddr net.Addr, idleTimeout time.Duration, info proxyR
 		attrs = append(attrs, "mode", "socks", "dns", info.meta.dnsMode)
 	} else {
 		attrs = append(attrs,
-			"endpoint", selectedProxyEndpoint(info.endpoint, info.endpointSelector),
+			"endpoint", selectedProxyEndpoint(info.endpoint),
 			"transport", resolvedTransportLabel(info),
 			"dns", info.meta.dnsMode,
 			"tunnel", "up",

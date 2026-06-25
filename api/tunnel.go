@@ -168,13 +168,12 @@ type ConnectionConfig struct {
 	KeepAlivePeriod      time.Duration
 	InitialPacketSize    uint16
 	Endpoint             net.Addr
-	EndpointSelector     func() net.Addr // Optional endpoint selector invoked for each connection attempt.
 	UseHTTP2             bool
 	MTU                  int
 	MaxReconnectAttempts int // 连续连接失败达到阈值后暂停重连；0表示无限重试
 	ReconnectStrategy    BackoffStrategy
-	OnConnected          func()          // Optional callback after MASQUE connection is established.
-	OnDisconnected       func(err error) // Optional callback after an established MASQUE connection is lost.
+	OnConnected          func()              // Optional callback after MASQUE connection is established.
+	OnDisconnected       func(err error)     // Optional callback after an established MASQUE connection is lost.
 	ReconnectLog         *TunnelReconnectLog // Optional state for compact reconnect logging.
 
 	// AlwaysReconnect, when true, rebuilds the tunnel immediately after it is
@@ -255,11 +254,6 @@ func handleConnectionWithForwarding(ctx context.Context, config ConnectionConfig
 	}()
 
 	endpoint := config.Endpoint
-	if config.EndpointSelector != nil {
-		if selected := config.EndpointSelector(); selected != nil {
-			endpoint = selected
-		}
-	}
 	if endpoint == nil {
 		return reconnectAttempt + 1, fmt.Errorf("no endpoint configured for tunnel connection")
 	}
@@ -349,16 +343,10 @@ func tunnelTransportLabel(useHTTP2 bool) string {
 }
 
 func selectedTunnelEndpoint(config ConnectionConfig) string {
-	endpoint := config.Endpoint
-	if config.EndpointSelector != nil {
-		if selected := config.EndpointSelector(); selected != nil {
-			endpoint = selected
-		}
-	}
-	if endpoint == nil {
+	if config.Endpoint == nil {
 		return ""
 	}
-	return endpoint.String()
+	return config.Endpoint.String()
 }
 
 func MaintainTunnel(ctx context.Context, config ConnectionConfig, device TunnelDevice) {
