@@ -102,11 +102,10 @@ func setupAndRunL4Proxy(cmd *cobra.Command, overrides []string, configSaved bool
 	connectionTimeout, idleTimeout := getL4TimeoutSettings()
 
 	l4Proxy, err := api.NewL4Proxy(api.L4ProxyConfig{
-		TLSConfig:                  tlsConfig,
-		QUICConfig:                 l4QUICConfig(config.AppConfig.Socks.KeepalivePeriod.Duration(), config.AppConfig.Socks.InitialPacketSize),
-		Endpoint:                   endpoint,
-		ConnectTimeout:             connectionTimeout,
-		MaxConsecutiveConnFailures: config.AppConfig.Socks.L4MaxConnFailures,
+		TLSConfig:      tlsConfig,
+		QUICConfig:     l4QUICConfig(config.AppConfig.Socks.KeepalivePeriod.Duration(), config.AppConfig.Socks.InitialPacketSize),
+		Endpoint:       endpoint,
+		ConnectTimeout: connectionTimeout,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create L4 proxy: %w", err)
@@ -274,12 +273,6 @@ const l4HighInFlightFloor = 64
 func logL4Stats(ctx context.Context, l4Proxy *api.L4Proxy) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
-	// Surface a degrading connection once its un-answered run passes a quarter of the
-	// configured trip threshold — early enough to see a wedge before the rebuild.
-	softWedge := l4Proxy.MaxConsecutiveFails() / 4
-	if softWedge < 1 {
-		softWedge = 1
-	}
 	var lastReconnects uint64
 	var maxInFlight int64
 	for {
@@ -288,23 +281,23 @@ func logL4Stats(ctx context.Context, l4Proxy *api.L4Proxy) {
 			return
 		case <-ticker.C:
 			inFlight, reconnects := l4Proxy.Stats()
-			consecutiveFails := l4Proxy.ConsecutiveFails()
 			newHighWater := inFlight > maxInFlight && inFlight >= l4HighInFlightFloor
 			if inFlight > maxInFlight {
 				maxInFlight = inFlight
 			}
-			if reconnects > lastReconnects || consecutiveFails >= softWedge || newHighWater {
+			// Bump to info only on an actionable interval — a rebuild fired (the shared
+			// connection died/wedged and self-healed) or a new in-flight high-water near
+			// the peer's stream ceiling — otherwise stay at debug.
+			if reconnects > lastReconnects || newHighWater {
 				slog.Info("l4 stream stats",
 					"in_flight", inFlight,
 					"in_flight_high_water", maxInFlight,
-					"consecutive_failures", consecutiveFails,
 					"reconnects_total", reconnects,
 					"reconnects_interval", reconnects-lastReconnects)
 			} else {
 				slog.Debug("l4 stream stats",
 					"in_flight", inFlight,
 					"in_flight_high_water", maxInFlight,
-					"consecutive_failures", consecutiveFails,
 					"reconnects_total", reconnects)
 			}
 			lastReconnects = reconnects

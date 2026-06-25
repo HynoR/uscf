@@ -45,16 +45,6 @@ const (
 	// the full connect timeout and inbound flows piling up. It is clamped to the
 	// connect timeout with a 1s floor.
 	defaultL4StreamOpenTimeout = 5 * time.Second
-	// defaultL4MaxConsecutiveConnFailures is the default count threshold for how many
-	// CONNECT handshakes may fail in a row — with no Cloudflare response in between —
-	// before the shared connection is declared wedged and rebuilt (see noteConnFailure).
-	// Configurable via L4ProxyConfig.MaxConsecutiveConnFailures (socks.l4_max_conn_failures)
-	// for tuning/experimentation. High enough that a transient blip or an occasional slow/
-	// blackholed target (interspersed with successes that reset the run) never trips it.
-	// The count alone only recovers promptly under high concurrency (many dials fail inside
-	// one connect-timeout window); the elapsed-time trip below bounds recovery under low
-	// concurrency, where reaching the count would otherwise take many serial windows.
-	defaultL4MaxConsecutiveConnFailures = 50
 )
 
 // L4ProxyConfig configures a new L4Proxy.
@@ -66,9 +56,6 @@ type L4ProxyConfig struct {
 	// ConnectTimeout bounds establishing the shared QUIC connection (and clamps the
 	// per-dial stream-open attempt).
 	ConnectTimeout time.Duration
-	// MaxConsecutiveConnFailures is the count threshold for the wedge detector (see
-	// noteConnFailure). <=0 falls back to defaultL4MaxConsecutiveConnFailures.
-	MaxConsecutiveConnFailures int
 }
 
 // L4Proxy opens one HTTP/3 CONNECT stream per proxied TCP connection over a single
@@ -82,9 +69,6 @@ type L4Proxy struct {
 	endpoint          *net.UDPAddr
 	connectTimeout    time.Duration
 	streamOpenTimeout time.Duration
-
-	// maxConsecutiveFails is the count threshold for the wedge detector (noteConnFailure).
-	maxConsecutiveFails int64
 
 	// dialSem is a context-aware single-flight (capacity 1) so concurrent dials that
 	// find no cached connection do not each dial a redundant one — the first builds it,
@@ -100,8 +84,7 @@ type L4Proxy struct {
 
 	inFlight         atomic.Int64  // currently open CONNECT streams (observability only — not a cap)
 	reconnects       atomic.Uint64 // cumulative shared-connection rebuilds (self-heal counter)
-	consecutiveFails atomic.Int64  // CONNECT handshakes failed in a row with no CF answer; rebuilds when it crosses maxConsecutiveFails
-	firstFailNanos   atomic.Int64  // unix-ns of the first un-answered failure in the current run; 0 = no run (drives the elapsed-time wedge trip)
+	firstFailNanos   atomic.Int64  // unix-ns of the first un-answered CONNECT failure in the current run; 0 = no run (drives the elapsed-time wedge trip)
 	establishedNanos atomic.Int64  // unix-ns the current shared connection was established; 0 = none (drives the uptime logged at teardown)
 }
 
@@ -126,19 +109,14 @@ func NewL4Proxy(cfg L4ProxyConfig) (*L4Proxy, error) {
 	if streamOpenTimeout < time.Second {
 		streamOpenTimeout = time.Second
 	}
-	maxConsecutiveFails := cfg.MaxConsecutiveConnFailures
-	if maxConsecutiveFails <= 0 {
-		maxConsecutiveFails = defaultL4MaxConsecutiveConnFailures
-	}
 
 	return &L4Proxy{
-		tlsConfig:           cfg.TLSConfig,
-		quicConfig:          cfg.QUICConfig,
-		endpoint:            cfg.Endpoint,
-		connectTimeout:      cfg.ConnectTimeout,
-		streamOpenTimeout:   streamOpenTimeout,
-		maxConsecutiveFails: int64(maxConsecutiveFails),
-		dialSem:             make(chan struct{}, 1),
+		tlsConfig:         cfg.TLSConfig,
+		quicConfig:        cfg.QUICConfig,
+		endpoint:          cfg.Endpoint,
+		connectTimeout:    cfg.ConnectTimeout,
+		streamOpenTimeout: streamOpenTimeout,
+		dialSem:           make(chan struct{}, 1),
 	}, nil
 }
 
@@ -251,7 +229,6 @@ func (p *L4Proxy) closeConn(stale *http3.ClientConn) {
 	p.establishedNanos.Store(0)
 	p.mu.Unlock()
 
-	p.consecutiveFails.Store(0)
 	p.firstFailNanos.Store(0)
 	rebuilds := p.reconnects.Add(1)
 
@@ -298,19 +275,17 @@ func quicConnCloseCause(conn *quic.Conn) string {
 // opened, but Cloudflare delivered no response. A wedged connection stays alive at the
 // QUIC layer (keepalive still flows, so OpenRequestStream keeps succeeding and quic-go
 // never reports it dead) yet answers nothing — so the rebuild-on-OpenRequestStream-failure
-// path never fires and every dial hangs to its deadline. When enough handshakes fail in a
-// row with no answer in between, the connection is wedged: tear it down so the next dial
-// rebuilds. A single 2xx OR per-target rejection resets the run, so an occasional slow or
-// blackholed target among healthy traffic never trips it. Ignored when the caller gave up
-// (its ctx was cancelled) or when the failure is on an already-replaced connection.
+// path never fires and every dial hangs to its deadline.
 //
-// Two trips, whichever fires first:
-//   - count: maxConsecutiveFails failures in a row. This catches a wedge fast under high
-//     concurrency, where many dials fail within a single connect-timeout window.
-//   - elapsed time: a run of un-answered failures older than 2×connectTimeout. Under low
-//     concurrency (1-2 flows) the count alone would need ~maxConsecutiveFails serial
-//     connect-timeout windows to trip — minutes to nearly an hour of 假死 — so the timer
-//     bounds recovery to ~one window regardless of how few flows drive it.
+// The single trip is elapsed time: once a run of un-answered failures has lasted longer than
+// 2×connectTimeout, the connection is declared wedged and torn down so the next dial rebuilds.
+// A single Cloudflare answer (a 2xx OR a per-target rejection) clears the run, so an occasional
+// slow or blackholed target among healthy traffic never trips it. A pure count threshold was
+// deliberately dropped: a burst of concurrent failures (a transient blip, or several dials to
+// dead targets) could trip it and rebuild the whole connection — killing every other live flow
+// for ~no reason. The elapsed trip only fires on a *sustained* wedge, which is the only case a
+// rebuild actually helps. Ignored when the caller gave up (ctx cancelled) or when the failure
+// is on an already-replaced connection.
 func (p *L4Proxy) noteConnFailure(clientConn *http3.ClientConn, ctx context.Context, cause error) {
 	if errors.Is(ctx.Err(), context.Canceled) {
 		return
@@ -321,20 +296,17 @@ func (p *L4Proxy) noteConnFailure(clientConn *http3.ClientConn, ctx context.Cont
 	if !current {
 		return
 	}
-	n := p.consecutiveFails.Add(1)
-	if n == 1 {
-		p.firstFailNanos.Store(time.Now().UnixNano())
-	}
+	// Stamp the start of a no-answer run on the first failure; it never trips on its own
+	// (elapsed is ~0). A later failure that finds the run older than 2×connectTimeout trips.
 	first := p.firstFailNanos.Load()
-	wedgedFor := time.Duration(0)
-	if first != 0 {
-		wedgedFor = time.Since(time.Unix(0, first))
+	if first == 0 {
+		p.firstFailNanos.Store(time.Now().UnixNano())
+		return
 	}
-	wedgedTooLong := first != 0 && wedgedFor >= 2*p.connectTimeout
-	if n >= p.maxConsecutiveFails || wedgedTooLong {
+	wedgedFor := time.Since(time.Unix(0, first))
+	if wedgedFor >= 2*p.connectTimeout {
 		slog.Warn("l4 shared connection stopped answering CONNECTs (wedged); forcing a rebuild",
-			"consecutive_failures", n, "wedged_for", wedgedFor.Round(time.Second),
-			"trip", tripReason(n >= p.maxConsecutiveFails), "last_error", errString(cause))
+			"wedged_for", wedgedFor.Round(time.Second), "last_error", errString(cause))
 		p.closeConn(clientConn)
 	}
 }
@@ -345,14 +317,6 @@ func errString(err error) string {
 		return ""
 	}
 	return err.Error()
-}
-
-// tripReason labels which wedge trip fired, for the rebuild log line.
-func tripReason(byCount bool) string {
-	if byCount {
-		return "count"
-	}
-	return "elapsed"
 }
 
 // localAddr returns the cached connection's local UDP address (for SOCKS bound-address
@@ -370,20 +334,55 @@ func (p *L4Proxy) Stats() (inFlight int64, reconnects uint64) {
 	return p.inFlight.Load(), p.reconnects.Load()
 }
 
-// ConsecutiveFails reports the current run of un-answered CONNECT failures on the shared
-// connection (a wedge in progress). It climbs toward MaxConsecutiveFails and resets to 0 on
-// any Cloudflare answer or a rebuild, so a non-zero value at observation time means the
-// connection is degrading — surfaced by logL4Stats so a wedge is visible before the rebuild.
-func (p *L4Proxy) ConsecutiveFails() int64 { return p.consecutiveFails.Load() }
+// openStream opens one CONNECT request stream on clientConn, bounded by
+// streamOpenTimeout so a dead or saturated connection is detected quickly.
+func (p *L4Proxy) openStream(ctx context.Context, clientConn *http3.ClientConn) (*http3.RequestStream, error) {
+	openCtx, cancel := context.WithTimeout(ctx, p.streamOpenTimeout)
+	defer cancel()
+	return clientConn.OpenRequestStream(openCtx)
+}
 
-// MaxConsecutiveFails returns the configured count threshold at which a wedge run forces a
-// rebuild (socks.l4_max_conn_failures), for sizing the degradation-warning threshold.
-func (p *L4Proxy) MaxConsecutiveFails() int64 { return p.maxConsecutiveFails }
+// openStreamWithRetry returns a fresh CONNECT request stream, rebuilding the shared
+// connection once and retrying if the cached one was stale. This is the usque-style
+// transparent recovery: the common case — Cloudflare idle-evicted the shared
+// connection, so the cached clientConn is dead and OpenRequestStream fails — is healed
+// within a single dial (one fresh QUIC handshake) instead of surfacing as a failed dial
+// the client has to retry. The rebuild+retry is skipped only when the CALLER cancelled
+// (its own ctx is done): the connection is fine, the client just gave up. It returns the
+// clientConn the stream belongs to, for the CONNECT-exchange wedge accounting.
+func (p *L4Proxy) openStreamWithRetry(ctx context.Context) (*http3.ClientConn, *http3.RequestStream, error) {
+	clientConn, err := p.dialConn(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	stream, err := p.openStream(ctx, clientConn)
+	if err == nil {
+		return clientConn, stream, nil
+	}
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return nil, nil, err
+	}
+
+	// The cached connection was stale/dead: tear it down, rebuild, and retry the open once.
+	p.closeConn(clientConn)
+	clientConn, err = p.dialConn(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	stream, err = p.openStream(ctx, clientConn)
+	if err != nil {
+		if !errors.Is(ctx.Err(), context.Canceled) {
+			p.closeConn(clientConn)
+		}
+		return nil, nil, err
+	}
+	return clientConn, stream, nil
+}
 
 // DialContext connects target (an "ip:port" authority) over an L4 MASQUE HTTP/3
 // CONNECT stream and returns it as a net.Conn. It follows mihomo's sequence: reuse the
-// cached connection, open a request stream, and rebuild the connection if the stream
-// could not be opened.
+// cached connection, open a request stream (rebuilding once if it was stale), then run
+// the CONNECT exchange.
 func (p *L4Proxy) DialContext(ctx context.Context, target string) (net.Conn, error) {
 	if p == nil || p.tlsConfig == nil {
 		return nil, fmt.Errorf("missing TLS config")
@@ -392,25 +391,8 @@ func (p *L4Proxy) DialContext(ctx context.Context, target string) (net.Conn, err
 		return nil, fmt.Errorf("missing HTTP/3 UDP endpoint")
 	}
 
-	clientConn, err := p.dialConn(ctx)
+	clientConn, stream, err := p.openStreamWithRetry(ctx)
 	if err != nil {
-		return nil, err
-	}
-
-	// Bound the stream open so a dead or saturated connection is detected quickly.
-	openCtx, cancelOpen := context.WithTimeout(ctx, p.streamOpenTimeout)
-	stream, err := clientConn.OpenRequestStream(openCtx)
-	cancelOpen()
-	if err != nil {
-		// The recovery primitive: if we could not open a stream, the shared connection
-		// is dead or at the peer's MAX_STREAMS. Tear it down so the next dial rebuilds.
-		// Skip the teardown ONLY when the CALLER cancelled (its own ctx is done): the
-		// connection is fine, the client just gave up, so do not punish other flows. A
-		// deadline-expired dial still rebuilds (mihomo always rebuilds on this failure)
-		// — using the same predicate as noteConnFailure so the two self-heal gates agree.
-		if !errors.Is(ctx.Err(), context.Canceled) {
-			p.closeConn(clientConn)
-		}
 		return nil, err
 	}
 
@@ -444,7 +426,6 @@ func (p *L4Proxy) DialContext(ctx context.Context, target string) (net.Conn, err
 	// Cloudflare answered — a 2xx or a per-target rejection alike proves the shared
 	// connection is servicing requests, so clear the wedge run and the handshake deadline
 	// (the relay re-arms its own deadlines from here on).
-	p.consecutiveFails.Store(0)
 	p.firstFailNanos.Store(0)
 	_ = stream.SetDeadline(time.Time{})
 	if response.StatusCode < 200 || response.StatusCode > 299 {

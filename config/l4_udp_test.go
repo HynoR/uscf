@@ -75,41 +75,6 @@ func TestNormalizeSocksConfigL4HalfOpenTimeout(t *testing.T) {
 	}
 }
 
-// TestNormalizeSocksConfigL4MaxConnFailures verifies the configurable wedge-detector count
-// threshold defaults to 50 when unset/non-positive and is otherwise preserved (so it can be
-// tuned for experimentation).
-func TestNormalizeSocksConfigL4MaxConnFailures(t *testing.T) {
-	base := GetDefaultSocksConfig()
-	if DefaultL4MaxConnFailures != 50 {
-		t.Fatalf("DefaultL4MaxConnFailures = %d, want 50", DefaultL4MaxConnFailures)
-	}
-	if base.L4MaxConnFailures != DefaultL4MaxConnFailures {
-		t.Fatalf("default L4MaxConnFailures = %d, want %d", base.L4MaxConnFailures, DefaultL4MaxConnFailures)
-	}
-
-	for _, in := range []int{0, -7} {
-		cfg := base
-		cfg.L4MaxConnFailures = in
-		got, err := NormalizeSocksConfig(cfg)
-		if err != nil {
-			t.Fatalf("NormalizeSocksConfig(l4_max_conn_failures=%d): %v", in, err)
-		}
-		if got.L4MaxConnFailures != DefaultL4MaxConnFailures {
-			t.Fatalf("l4_max_conn_failures=%d -> %d, want default %d", in, got.L4MaxConnFailures, DefaultL4MaxConnFailures)
-		}
-	}
-
-	cfg := base
-	cfg.L4MaxConnFailures = 25 // a tuned-down experimental value is preserved
-	got, err := NormalizeSocksConfig(cfg)
-	if err != nil {
-		t.Fatalf("NormalizeSocksConfig: %v", err)
-	}
-	if got.L4MaxConnFailures != 25 {
-		t.Fatalf("in-range L4MaxConnFailures = %d, want 25", got.L4MaxConnFailures)
-	}
-}
-
 // TestNormalizeSocksConfigL4HalfOpenClampedToIdle proves the half-open reaper stays a
 // SHORTENER: a half-open timeout larger than the idle timeout is clamped down so it can
 // never extend the surviving direction's idle past a fully-open flow.
