@@ -37,6 +37,17 @@ func newWGRegisterCmd() *cobra.Command {
 	return cmd
 }
 
+// wgRegisterOptions carries the inputs shared by `uscf wg register` and the
+// auto-registration performed by `uscf proxy --wg`.
+type wgRegisterOptions struct {
+	name      string // device name shown in the 1.1.1.1 app (empty = unset)
+	model     string // device model
+	key       string // existing base64 private key (empty = generate a random one)
+	license   string // WARP+ license for premium registration (mutually exclusive with jwt)
+	jwt       string // team token for team registration (mutually exclusive with license)
+	acceptTOS bool   // when false, prompt interactively before registering
+}
+
 func runWGRegisterCmd(cmd *cobra.Command, args []string) error {
 	accountPath, _ := cmd.Flags().GetString("wg-account")
 	deviceName, _ := cmd.Flags().GetString("name")
@@ -46,47 +57,80 @@ func runWGRegisterCmd(cmd *cobra.Command, args []string) error {
 	jwtValue, _ := cmd.Flags().GetString("jwt")
 	acceptTOS, _ := cmd.Flags().GetBool("accept-tos")
 
-	licenseValue = strings.TrimSpace(licenseValue)
-	jwtValue = strings.TrimSpace(jwtValue)
-	if licenseValue != "" && jwtValue != "" {
-		return fmt.Errorf("cannot use --license and --jwt together")
-	}
-
 	if err := ensureWGAcceptedTOS(acceptTOS); err != nil {
 		return err
 	}
 
-	privateKey, err := loadOrCreateWGPrivateKey(keyValue)
-	if err != nil {
-		return err
+	_, err := registerWGAccount(accountPath, wgRegisterOptions{
+		name:      deviceName,
+		model:     model,
+		key:       keyValue,
+		license:   licenseValue,
+		jwt:       jwtValue,
+		acceptTOS: acceptTOS,
+	})
+	return err
+}
+
+// ensureWGAccount returns a valid WireGuard account from accountPath, registering
+// and saving a new one when the file is missing or invalid. It is the auto-setup
+// entry point used by `uscf proxy --wg`: an existing valid account is reused
+// as-is (no TOS prompt, no network call), while a first run transparently
+// registers a device (free by default; premium/team via opts.license/opts.jwt).
+func ensureWGAccount(accountPath string, opts wgRegisterOptions) (config.WGAccount, error) {
+	if account, err := wgLoadAccountFunc(accountPath); err == nil {
+		if account.Validate() == nil {
+			return account, nil
+		}
+	}
+	if err := ensureWGAcceptedTOS(opts.acceptTOS); err != nil {
+		return config.WGAccount{}, err
+	}
+	return registerWGAccount(accountPath, opts)
+}
+
+// registerWGAccount registers a standalone WireGuard device and saves it to
+// accountPath. It is the shared body behind `uscf wg register` and the
+// auto-registration in ensureWGAccount; the caller is responsible for TOS
+// acceptance before invoking it.
+func registerWGAccount(accountPath string, opts wgRegisterOptions) (config.WGAccount, error) {
+	license := strings.TrimSpace(opts.license)
+	jwt := strings.TrimSpace(opts.jwt)
+	if license != "" && jwt != "" {
+		return config.WGAccount{}, fmt.Errorf("cannot use --license and --jwt together")
 	}
 
-	accountData, err := wgRegisterDeviceFunc(privateKey.Public().String(), model, jwtValue)
+	privateKey, err := loadOrCreateWGPrivateKey(opts.key)
 	if err != nil {
-		return fmt.Errorf("register wireguard device: %w", err)
+		return config.WGAccount{}, err
 	}
-	if licenseValue != "" {
-		finalAccount, _, apiErr, err := wgRebindLicenseFunc(accountData, licenseValue)
+
+	accountData, err := wgRegisterDeviceFunc(privateKey.Public().String(), opts.model, jwt)
+	if err != nil {
+		return config.WGAccount{}, fmt.Errorf("register wireguard device: %w", err)
+	}
+	if license != "" {
+		finalAccount, _, apiErr, err := wgRebindLicenseFunc(accountData, license)
 		if err != nil {
 			if apiErr != nil {
-				return fmt.Errorf("rebind wireguard license: %w (API errors: %s)", err, apiErr.ErrorsAsString("; "))
+				return config.WGAccount{}, fmt.Errorf("rebind wireguard license: %w (API errors: %s)", err, apiErr.ErrorsAsString("; "))
 			}
-			return fmt.Errorf("rebind wireguard license: %w", err)
+			return config.WGAccount{}, fmt.Errorf("rebind wireguard license: %w", err)
 		}
 		accountData.Account = finalAccount
 	}
 
-	account := buildWGAccount(accountData, privateKey.String(), deviceName, model)
+	account := buildWGAccount(accountData, privateKey.String(), opts.name, opts.model)
 	if err := wgSaveAccountFunc(accountPath, account); err != nil {
-		return fmt.Errorf("save wg account: %w", err)
+		return config.WGAccount{}, fmt.Errorf("save wg account: %w", err)
 	}
 
-	if strings.TrimSpace(deviceName) != "" {
-		if err := wgSetDeviceNameFunc(accountData.ID, accountData.Token, deviceName); err != nil {
-			return fmt.Errorf("set device name: %w (wg account already saved to %s)", err, accountPath)
+	if strings.TrimSpace(opts.name) != "" {
+		if err := wgSetDeviceNameFunc(accountData.ID, accountData.Token, opts.name); err != nil {
+			return config.WGAccount{}, fmt.Errorf("set device name: %w (wg account already saved to %s)", err, accountPath)
 		}
 	}
-	return nil
+	return account, nil
 }
 
 func ensureWGAcceptedTOS(accepted bool) error {

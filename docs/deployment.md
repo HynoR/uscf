@@ -176,6 +176,20 @@ The WG image creates these files on first successful bootstrap:
 
 Existing WG deployments must have at least `config.json` and `wgcf.conf`. Any partial state other than "all three missing" or "`config.json` plus `wgcf.conf` present" fails fast.
 
+### Experimental In-Process WireGuard
+
+For a single-binary alternative that needs neither `wg-quick` nor `--privileged`, `uscf proxy` can run an in-process WireGuard data plane and expose it directly as SOCKS5 — the same front door as the MASQUE transports, selected like `--l4`:
+
+```bash
+uscf proxy --wg --experimental                 # auto-registers wg-account.json, then serves SOCKS5
+uscf proxy --wg --experimental --license <KEY>  # WARP+
+uscf proxy --wg --experimental --jwt <TEAM-JWT> # Team
+```
+
+It auto-registers `wg-account.json` on first run (never touches `key.json`), reuses the shared `socks` config block, and persists `socks.wg: true` so a config-/Docker-driven run needs only `--experimental` thereafter. It is mutually exclusive with `--l4`/`--http2` (one transport per process).
+
+A reconnect supervisor gives it runtime parity with the MASQUE transports: it watches the session and, when it wedges (sending but receiving nothing for ~3× `keepalive_period`), re-points the peer endpoint in place via UAPI — following a moved WARP edge without dropping the SOCKS listener — while gating new dials and draining stale connections (`drain_grace`) during the outage. It remains **experimental**, not the supported production runtime; the `wg-*` Docker image above is still the recommended WG deployment.
+
 ## WG Account Upgrade
 
 WG upgrades are explicit because `wgcf.conf` must be regenerated before the container can use the new account state.

@@ -11,6 +11,5 @@ func init() {
 	wgCmd.AddCommand(newWGRegisterCmd())
 	wgCmd.AddCommand(newWGGenerateCmd())
 	wgCmd.AddCommand(newWGUpdateCmd())
-	wgCmd.AddCommand(newWGRunCmd())
 	rootCmd.AddCommand(wgCmd)
 }

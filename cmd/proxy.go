@@ -24,6 +24,7 @@ import (
 	"github.com/HynoR/uscf/api"
 	"github.com/HynoR/uscf/config"
 	"github.com/HynoR/uscf/internal"
+	"github.com/HynoR/uscf/internal/logging"
 	"github.com/HynoR/uscf/internal/netstack"
 	"github.com/spf13/cobra"
 	"golang.zx2c4.com/wireguard/tun"
@@ -91,6 +92,10 @@ func init() {
 	proxyCmd.Flags().Bool("http2", false, "Use HTTP/2 over TCP+TLS instead of HTTP/3 over QUIC (overrides config file)")
 	proxyCmd.Flags().Bool("l4", false, "Use L4 mode: tunnel each TCP flow as an HTTP/3 CONNECT stream, bypassing the userspace netstack (faster, TCP-only)")
 	proxyCmd.Flags().String("l4-udp", "", "L4 UDP handling: \"block\" (reject UDP ASSOCIATE), \"direct\" (relay UDP directly, bypassing WARP), or \"tunnel\" (mix mode: UDP over a parallel L3 connect-ip tunnel)")
+	proxyCmd.Flags().Bool("wg", false, "(experimental) Use the in-process WireGuard transport instead of MASQUE; auto-registers wg-account.json on first run (requires --experimental; mutually exclusive with --l4/--http2)")
+	proxyCmd.Flags().Bool("experimental", false, "Acknowledge and enable experimental modes (currently gates --wg)")
+	proxyCmd.Flags().String("wg-account", "wg-account.json", "WireGuard account file used by --wg (auto-registered if missing)")
+	proxyCmd.Flags().Int("wg-keepalive", defaultWGRunKeepalive, "PersistentKeepalive seconds for the --wg peer (0 disables)")
 
 	// 添加提示，说明SOCKS配置已移至配置文件，但可通过命令行参数覆盖
 	proxyCmd.Long += "\n\nNote: All SOCKS proxy settings are primarily managed through the config file, but can be overridden with command-line flags."
@@ -107,6 +112,13 @@ func runProxyCmd(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get config path: %w", err)
 	}
 	configPath = config.ResolveConfigPath(configPath)
+
+	// Experimental WireGuard transport: fully isolated from MASQUE (no key.json,
+	// no MASQUE registration). Branch out before any MASQUE startup logic.
+	if wgModeSelected(cmd) {
+		return runProxyWGMode(cmd, configPath)
+	}
+
 	customLicense, _ := cmd.Flags().GetString("license")
 	customLicense = strings.TrimSpace(customLicense)
 	customJWT, _ := cmd.Flags().GetString("jwt")
@@ -197,6 +209,96 @@ func runProxyCmd(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// wgModeSelected reports whether the experimental WireGuard transport is
+// selected, honoring an explicit --wg flag over the persisted socks.wg.
+func wgModeSelected(cmd *cobra.Command) bool {
+	if cmd.Flags().Changed("wg") {
+		v, _ := cmd.Flags().GetBool("wg")
+		return v
+	}
+	return config.AppConfig.Socks.WG
+}
+
+// runProxyWGMode runs the experimental in-process WireGuard transport. It is
+// fully isolated from MASQUE: it never reads or writes key.json, skips MASQUE
+// registration, and carries its identity in wg-account.json (auto-registered on
+// first run). It mirrors the convenience of --l4: `uscf proxy --wg --experimental`
+// with no other flags just works.
+func runProxyWGMode(cmd *cobra.Command, configPath string) error {
+	if exp, _ := cmd.Flags().GetBool("experimental"); !exp {
+		return fmt.Errorf("`--wg` is experimental; re-run with --experimental to enable it (the stable WireGuard path is `uscf wg generate`)")
+	}
+	slog.Warn("wg mode is EXPERIMENTAL and not for production; `uscf wg generate` remains the stable path")
+
+	// When no config file was found the root loader leaves AppConfig zero — fall
+	// back to defaults so the shared socks block is usable (mirrors `uscf socks`).
+	if !config.ConfigLoaded {
+		config.AppConfig = config.Config{
+			Socks:   config.GetDefaultSocksConfig(),
+			Logging: config.GetDefaultLoggingConfig(),
+		}
+		config.AppConfig.Logging = logging.Setup(config.AppConfig.Logging)
+	}
+
+	// Fold CLI overrides (bind/port/auth + --wg) into the config.
+	configChanged, flagOverrides := applySocksFlagOverrides(cmd, &config.AppConfig)
+
+	// One transport per process: reject a conflicting MASQUE selection before any
+	// disk write or network call.
+	if err := rejectConflictingTransport(); err != nil {
+		return err
+	}
+
+	// Persist the PUBLIC config only: WG carries identity in wg-account.json, so
+	// we never synthesize an empty sibling key.json.
+	if configChanged {
+		if err := config.AppConfig.SavePublicConfig(configPath); err != nil {
+			slog.Warn("config save failed", "path", configPath, "error", err)
+		}
+	}
+
+	// Auto-register a standalone WG account on first run (free by default;
+	// premium/team via --license/--jwt). An existing valid account is reused.
+	license, _ := cmd.Flags().GetString("license")
+	jwt, _ := cmd.Flags().GetString("jwt")
+	name, _ := cmd.Flags().GetString("name")
+	model, _ := cmd.Flags().GetString("model")
+	acceptTOS, _ := cmd.Flags().GetBool("accept-tos")
+	accountPath, _ := cmd.Flags().GetString("wg-account")
+
+	account, err := ensureWGAccount(accountPath, wgRegisterOptions{
+		name:      name,
+		model:     model,
+		license:   strings.TrimSpace(license),
+		jwt:       strings.TrimSpace(jwt),
+		acceptTOS: acceptTOS,
+	})
+	if err != nil {
+		return fmt.Errorf("prepare wg account: %w", err)
+	}
+
+	keepalive, _ := cmd.Flags().GetInt("wg-keepalive")
+	return runWireGuardTransport(cmd, account, flagOverrides, wgTransportParams{
+		mtu:       config.AppConfig.Socks.MTU,
+		keepalive: keepalive,
+	})
+}
+
+// rejectConflictingTransport enforces one transport per process: --wg must not
+// run alongside an effective L4/HTTP2 selection. applySocksFlagOverrides has
+// already folded any --l4/--http2 flags into the config, so the effective
+// values live on config.AppConfig.Socks.
+func rejectConflictingTransport() error {
+	switch {
+	case config.AppConfig.Socks.L4:
+		return fmt.Errorf("--wg cannot be combined with l4 mode; disable socks.l4 (or pass --l4=false) to use WireGuard")
+	case config.AppConfig.Socks.HTTP2:
+		return fmt.Errorf("--wg cannot be combined with http2 mode; disable socks.http2 (or pass --http2=false) to use WireGuard")
+	default:
+		return nil
+	}
+}
+
 func applySocksFlagOverrides(cmd *cobra.Command, cfg *config.Config) (bool, []string) {
 	configChanged := false
 	var overrides []string
@@ -244,6 +346,13 @@ func applySocksFlagOverrides(cmd *cobra.Command, cfg *config.Config) (bool, []st
 		cfg.Socks.L4 = useL4
 		configChanged = true
 		overrides = append(overrides, "l4")
+	}
+
+	if cmd.Flags().Changed("wg") {
+		useWG, _ := cmd.Flags().GetBool("wg")
+		cfg.Socks.WG = useWG
+		configChanged = true
+		overrides = append(overrides, "wg")
 	}
 
 	if cmd.Flags().Changed("l4-udp") {

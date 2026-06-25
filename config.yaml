@@ -1,0 +1,34 @@
+custom_endpoints_v4: null
+custom_endpoints_v6: null
+logging:
+  format: ""
+  level: ""
+  socks_verbose: false
+registration:
+  device_name: ""
+socks:
+  bind_address: 0.0.0.0
+  block_udp_443: false
+  bypass_domain: null
+  connect_port: 443
+  connection_timeout: 30s
+  dns:
+  - 1.1.1.1
+  - 8.8.8.8
+  dns_timeout: 2s
+  idle_timeout: 5m0s
+  initial_packet_size: 1350
+  keepalive_period: 30s
+  max_reconnect_attempts: 0
+  mtu: 1280
+  no_tunnel_ipv4: false
+  no_tunnel_ipv6: false
+  password: ""
+  port: "1080"
+  proxy_tcp_port: null
+  reconnect_delay: 1s
+  remote_dns: false
+  self_check: false
+  sni_address: ""
+  use_ipv6: false
+  username: ""

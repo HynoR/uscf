@@ -3,7 +3,7 @@ module github.com/HynoR/uscf
 go 1.25.5
 
 require (
-	github.com/Diniboy1123/connect-ip-go v0.0.0-20260409225322-8d7bb0a858a2
+	github.com/Diniboy1123/connect-ip-go v0.0.0-20260613064811-66cba32d7d33
 	github.com/quic-go/quic-go v0.60.0
 	github.com/spf13/cobra v1.9.1
 	github.com/txthinking/socks5 v0.0.0-20251011041537-5c31f201a10e

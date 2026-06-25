@@ -121,6 +121,7 @@ type SocksConfig struct {
 	UseIPv6              bool     `json:"use_ipv6"`               // 是否使用IPv6进行MASQUE连接
 	HTTP2                bool     `json:"http2"`                  // true=TCP+TLS+HTTP/2; false=QUIC+HTTP/3
 	L4                   bool     `json:"l4"`                     // true=L4模式(HTTP/3 CONNECT流, 绕过netstack, 仅TCP); 与http2互斥
+	WG                   bool     `json:"wg"`                     // true=实验性进程内WireGuard传输(替代MASQUE);需配合 proxy --experimental;与 http2/l4 互斥
 	L4UDP                string   `json:"l4_udp"`                 // L4模式下UDP处理: "block"(默认,拒绝UDP ASSOCIATE) | "direct"(本地直连,绕过隧道,UDP以真实出口IP外发) | "tunnel"(mix模式,UDP走并行L3 connect-ip隧道,真实WARP IP出口)
 	NoTunnelIPv4         bool     `json:"no_tunnel_ipv4"`         // 是否在MASQUE隧道内禁用IPv4
 	NoTunnelIPv6         bool     `json:"no_tunnel_ipv6"`         // 是否在MASQUE隧道内禁用IPv6
@@ -529,6 +530,29 @@ func (*Config) SaveConfig(configPath string) error {
 		return fmt.Errorf("failed to write key file: %w", err)
 	}
 
+	return nil
+}
+
+// SavePublicConfig writes only the reusable/public settings (config.yaml) and
+// never touches key.json. It is used by transports that carry their own identity
+// store outside key.json — notably the experimental WireGuard mode, which uses
+// wg-account.json — so enabling them does not create or overwrite a sibling
+// key.json with empty MASQUE identity material.
+func (*Config) SavePublicConfig(configPath string) error {
+	if strings.TrimSpace(configPath) == "" {
+		configPath = "config.json"
+	}
+
+	normalized := AppConfig
+	var err error
+	normalized.Socks, err = NormalizeSocksConfig(normalized.Socks)
+	if err != nil {
+		return err
+	}
+
+	if err := writeConfigFile(configPath, extractPublicConfig(normalized)); err != nil {
+		return fmt.Errorf("failed to write config file: %w", err)
+	}
 	return nil
 }
 

@@ -1,7 +1,8 @@
 #!/bin/sh
 set -eu
 
-# Entrypoint for the EXPERIMENTAL in-process WireGuard run mode (`uscf wg run`).
+# Entrypoint for the EXPERIMENTAL in-process WireGuard mode
+# (`uscf proxy --wg --experimental`).
 #
 # Unlike the kernel-WireGuard mode (entrypoint-wg-socks.sh, which needs
 # wg-quick + NET_ADMIN + iptables), this mode runs a userspace WireGuard data
@@ -19,11 +20,10 @@ SOCKS_PORT="${SOCKS_PORT:-1080}"
 SOCKS_USERNAME="${SOCKS_USERNAME:-}"
 SOCKS_PASSWORD="${SOCKS_PASSWORD:-}"
 
-# wg run tuning (all optional; empty => use the command's built-in defaults).
-WG_RUN_MTU="${WG_RUN_MTU:-}"
+# wg tuning (all optional; empty => use the command's built-in defaults).
+# WG_RUN_KEEPALIVE maps to --wg-keepalive; MTU follows socks.mtu in config.json.
+# WG_RUN_EXTRA_ARGS passes through any additional proxy flags verbatim.
 WG_RUN_KEEPALIVE="${WG_RUN_KEEPALIVE:-}"
-WG_RUN_LISTEN_PORT="${WG_RUN_LISTEN_PORT:-}"
-WG_RUN_HANDSHAKE_TIMEOUT="${WG_RUN_HANDSHAKE_TIMEOUT:-}"
 WG_RUN_EXTRA_ARGS="${WG_RUN_EXTRA_ARGS:-}"
 
 # WG_TEAM_JWT (optional): register a Zero Trust / Team account instead of free.
@@ -91,15 +91,12 @@ echo "========================="
 
 # exec replaces this shell, so uscf becomes the container's main process and
 # receives SIGTERM/SIGINT directly. The tuning vars are all space-free
-# (numbers / durations like "30s"), so the conditional expansions are safe.
+# (numbers), so the conditional expansions are safe.
 # shellcheck disable=SC2086
-exec "$USCF_BIN" wg run --experimental \
+exec "$USCF_BIN" proxy --wg --experimental \
     -c "$SOCKS_CONFIG_PATH" \
     --wg-account "$WG_ACCOUNT_PATH" \
     -b "$SOCKS_BIND_ADDRESS" \
-    ${WG_RUN_MTU:+--mtu $WG_RUN_MTU} \
-    ${WG_RUN_KEEPALIVE:+--keepalive $WG_RUN_KEEPALIVE} \
-    ${WG_RUN_LISTEN_PORT:+--listen-port $WG_RUN_LISTEN_PORT} \
-    ${WG_RUN_HANDSHAKE_TIMEOUT:+--handshake-timeout $WG_RUN_HANDSHAKE_TIMEOUT} \
+    ${WG_RUN_KEEPALIVE:+--wg-keepalive $WG_RUN_KEEPALIVE} \
     $WG_RUN_EXTRA_ARGS \
     "$@"

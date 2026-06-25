@@ -2,8 +2,8 @@
 set -eu
 
 # Non-interactive Docker deploy + smoke test for the EXPERIMENTAL in-process
-# WireGuard run mode (`uscf wg run`). Designed to be driven from env vars so it
-# can be wired into automated test runs.
+# WireGuard mode (`uscf proxy --wg --experimental`). Designed to be driven from
+# env vars so it can be wired into automated test runs.
 #
 # Unlike the kernel-WireGuard image (runtime-wg / deploy-docker.sh "wg" mode),
 # this image runs userspace WireGuard inside uscf and needs NO extra Linux
@@ -25,7 +25,7 @@ set -eu
 #   PUBLISH_ADDR=127.0.0.1       Host address to publish the SOCKS port on
 #   SOCKS_USERNAME= / SOCKS_PASSWORD=   Optional SOCKS auth
 #   WG_TEAM_JWT=                 Optional Team JWT (registers a Team account)
-#   WG_RUN_MTU= / WG_RUN_KEEPALIVE= / WG_RUN_HANDSHAKE_TIMEOUT=   Optional wg run tuning
+#   WG_RUN_KEEPALIVE=            Optional WG PersistentKeepalive (--wg-keepalive)
 #   SMOKE_TEST=1                 1 = wait for healthy + curl a trace through the proxy
 #   HEALTH_TIMEOUT=60            Seconds to wait for the container to become healthy
 
@@ -39,9 +39,7 @@ PUBLISH_ADDR="${PUBLISH_ADDR:-127.0.0.1}"
 SOCKS_USERNAME="${SOCKS_USERNAME:-}"
 SOCKS_PASSWORD="${SOCKS_PASSWORD:-}"
 WG_TEAM_JWT="${WG_TEAM_JWT:-}"
-WG_RUN_MTU="${WG_RUN_MTU:-}"
 WG_RUN_KEEPALIVE="${WG_RUN_KEEPALIVE:-}"
-WG_RUN_HANDSHAKE_TIMEOUT="${WG_RUN_HANDSHAKE_TIMEOUT:-}"
 SMOKE_TEST="${SMOKE_TEST:-1}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-60}"
 
@@ -83,9 +81,7 @@ run_container() {
     [ -n "$SOCKS_USERNAME" ] && set -- "$@" -e "SOCKS_USERNAME=${SOCKS_USERNAME}"
     [ -n "$SOCKS_PASSWORD" ] && set -- "$@" -e "SOCKS_PASSWORD=${SOCKS_PASSWORD}"
     [ -n "$WG_TEAM_JWT" ] && set -- "$@" -e "WG_TEAM_JWT=${WG_TEAM_JWT}"
-    [ -n "$WG_RUN_MTU" ] && set -- "$@" -e "WG_RUN_MTU=${WG_RUN_MTU}"
     [ -n "$WG_RUN_KEEPALIVE" ] && set -- "$@" -e "WG_RUN_KEEPALIVE=${WG_RUN_KEEPALIVE}"
-    [ -n "$WG_RUN_HANDSHAKE_TIMEOUT" ] && set -- "$@" -e "WG_RUN_HANDSHAKE_TIMEOUT=${WG_RUN_HANDSHAKE_TIMEOUT}"
 
     set -- "$@" "$IMAGE"
     "$@"
