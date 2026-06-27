@@ -9,7 +9,7 @@ require (
 	github.com/txthinking/socks5 v0.0.0-20251011041537-5c31f201a10e
 	github.com/yosida95/uritemplate/v3 v3.0.2
 	golang.org/x/crypto v0.53.0
-	golang.org/x/net v0.55.0
+	golang.org/x/net v0.56.0
 	golang.org/x/sync v0.21.0
 	golang.zx2c4.com/wireguard v0.0.0-20250505131008-436f7fdc1670
 	gvisor.dev/gvisor v0.0.0-20250503011706-39ed1f5ac29c
