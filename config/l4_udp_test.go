@@ -46,6 +46,35 @@ func TestDefaultSocksConfigL4UDPIsBlock(t *testing.T) {
 	}
 }
 
+// TestNormalizeSocksConfigL4PoolSize pins the L4 shard-count clamp: the default is the
+// single-connection main line (1), a non-positive size falls back to 1, and an oversized
+// one is capped at MaxL4PoolSize — so a misconfig can never fan out past the intended
+// blast-radius/egress trade-off.
+func TestNormalizeSocksConfigL4PoolSize(t *testing.T) {
+	if got := GetDefaultSocksConfig().L4PoolSize; got != DefaultL4PoolSize {
+		t.Fatalf("default L4PoolSize = %d, want %d", got, DefaultL4PoolSize)
+	}
+	if DefaultL4PoolSize != 1 {
+		t.Fatalf("DefaultL4PoolSize = %d, want 1 (single-connection main line)", DefaultL4PoolSize)
+	}
+
+	base := GetDefaultSocksConfig()
+	for _, tc := range []struct{ in, want int }{
+		{-5, DefaultL4PoolSize}, {0, DefaultL4PoolSize}, {1, 1}, {2, 2},
+		{MaxL4PoolSize, MaxL4PoolSize}, {MaxL4PoolSize + 1, MaxL4PoolSize}, {99, MaxL4PoolSize},
+	} {
+		cfg := base
+		cfg.L4PoolSize = tc.in
+		got, err := NormalizeSocksConfig(cfg)
+		if err != nil {
+			t.Fatalf("NormalizeSocksConfig(l4_pool_size=%d): %v", tc.in, err)
+		}
+		if got.L4PoolSize != tc.want {
+			t.Fatalf("NormalizeSocksConfig(l4_pool_size=%d).L4PoolSize = %d, want %d", tc.in, got.L4PoolSize, tc.want)
+		}
+	}
+}
+
 // TestNormalizeSocksConfigL4HalfOpenTimeout verifies the half-open reaper bound falls
 // back to its default when unset/non-positive and is otherwise preserved.
 func TestNormalizeSocksConfigL4HalfOpenTimeout(t *testing.T) {

@@ -101,23 +101,33 @@ func setupAndRunL4Proxy(cmd *cobra.Command, overrides []string, configSaved bool
 
 	connectionTimeout, idleTimeout := getL4TimeoutSettings()
 
-	l4Proxy, err := api.NewL4Proxy(api.L4ProxyConfig{
+	// L4Pool is a thin shard router over independent shared connections. Size 1 (the
+	// default) is byte-for-byte the single-connection L4Proxy — the proven main line.
+	// Size >1 shards downstream clients by source-IP hash for fault isolation, so one
+	// wedged connection only disrupts ~1/N of downstream devices.
+	poolSize := config.AppConfig.Socks.L4PoolSize
+	l4Pool, err := api.NewL4Pool(api.L4ProxyConfig{
 		TLSConfig:      tlsConfig,
 		QUICConfig:     l4QUICConfig(config.AppConfig.Socks.KeepalivePeriod.Duration(), config.AppConfig.Socks.InitialPacketSize),
 		Endpoint:       endpoint,
 		ConnectTimeout: connectionTimeout,
-	})
+	}, poolSize)
 	if err != nil {
 		return fmt.Errorf("failed to create L4 proxy: %w", err)
 	}
-	defer l4Proxy.Close()
+	defer l4Pool.Close()
+	if l4Pool.Size() > 1 {
+		slog.Info("l4 shard pool enabled (fault isolation by downstream source IP)",
+			"shards", l4Pool.Size(),
+			"note", "a wedged connection disrupts only the clients hashed to it (~1/N), not all downstreams")
+	}
 
-	// Periodically surface the live stream count and cumulative fast-fail rejections
-	// so an operator can see how close a single connection runs to its ceiling under
-	// load. Stops when the listener closes (runSocksServer returns).
+	// Periodically surface the live stream count and cumulative rebuilds so an operator
+	// can see how close the connection(s) run to the stream ceiling and how often a shard
+	// self-heals. Stops when the listener closes (runSocksServer returns).
 	statsCtx, stopStats := context.WithCancel(context.Background())
 	defer stopStats()
-	go logL4Stats(statsCtx, l4Proxy)
+	go logL4Stats(statsCtx, l4Pool)
 
 	// "mix" mode: stand up a parallel, lazy L3 connect-ip tunnel that carries UDP
 	// while TCP rides L4. It does not connect until the first UDP datagram, so a
@@ -133,7 +143,7 @@ func setupAndRunL4Proxy(cmd *cobra.Command, overrides []string, configSaved bool
 		udpTunnel = tunnel
 	}
 
-	socksRuntime, runtimeMeta, err := prepareL4SocksRuntime(l4Proxy, udpTunnel, connectionTimeout, idleTimeout)
+	socksRuntime, runtimeMeta, err := prepareL4SocksRuntime(l4Pool, udpTunnel, connectionTimeout, idleTimeout)
 	if err != nil {
 		return err
 	}
@@ -147,7 +157,7 @@ func setupAndRunL4Proxy(cmd *cobra.Command, overrides []string, configSaved bool
 	// surfaces at startup instead of on the first client request. A failure is
 	// non-fatal: the proxy still serves and retries lazily on demand.
 	warmCtx, cancel := context.WithTimeout(context.Background(), connectionTimeout)
-	if err := l4Proxy.Connect(warmCtx); err != nil {
+	if err := l4Pool.Connect(warmCtx); err != nil {
 		// Non-fatal by design (lazy retry), but if the cause is permanent — wrong endpoint,
 		// stale enrollment, blocked UDP — the proxy then reports "ready" yet fails EVERY flow
 		// with no further proxy-level signal. Make the one warm-up line actionable so that
@@ -270,7 +280,7 @@ const l4HighInFlightFloor = 64
 // the near-假死 state the prior incident had to be diagnosed without), or a new in-flight
 // high-water crossed the soft floor (running near the peer's stream ceiling) — so an operator
 // sees these without enabling debug. Returns when ctx is cancelled.
-func logL4Stats(ctx context.Context, l4Proxy *api.L4Proxy) {
+func logL4Stats(ctx context.Context, l4Pool *api.L4Pool) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	var lastReconnects uint64
@@ -280,7 +290,7 @@ func logL4Stats(ctx context.Context, l4Proxy *api.L4Proxy) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			inFlight, reconnects := l4Proxy.Stats()
+			inFlight, reconnects := l4Pool.Stats()
 			newHighWater := inFlight > maxInFlight && inFlight >= l4HighInFlightFloor
 			if inFlight > maxInFlight {
 				maxInFlight = inFlight
@@ -310,7 +320,7 @@ func logL4Stats(ctx context.Context, l4Proxy *api.L4Proxy) {
 // the SOCKS server is CONNECT-only (TCP), and the upstream dialer routes through
 // the L4 QUIC connection while bypass/proxy-port rules still fall back to a
 // direct dial.
-func prepareL4SocksRuntime(l4Proxy *api.L4Proxy, udpTunnel *l3UDPTunnel, connectionTimeout, idleTimeout time.Duration) (*socksRuntime, socksRuntimeMeta, error) {
+func prepareL4SocksRuntime(l4Pool *api.L4Pool, udpTunnel *l3UDPTunnel, connectionTimeout, idleTimeout time.Duration) (*socksRuntime, socksRuntimeMeta, error) {
 	routePolicy, err := newRoutePolicy(config.AppConfig.Socks.BypassDomain, config.AppConfig.Socks.ProxyTCPPort)
 	if err != nil {
 		return nil, socksRuntimeMeta{}, err
@@ -364,7 +374,7 @@ func prepareL4SocksRuntime(l4Proxy *api.L4Proxy, udpTunnel *l3UDPTunnel, connect
 		dialCtx, cancel := context.WithTimeout(ctx, connectionTimeout)
 		defer cancel()
 
-		conn, err := l4Proxy.DialContext(dialCtx, addr)
+		conn, err := l4Pool.DialContext(dialCtx, addr)
 		if err != nil {
 			return nil, err
 		}

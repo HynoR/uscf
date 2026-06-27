@@ -91,18 +91,18 @@ func TestL4DirectUDPLive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("select endpoint: %v", err)
 	}
-	l4Proxy, err := api.NewL4Proxy(api.L4ProxyConfig{
+	l4Pool, err := api.NewL4Pool(api.L4ProxyConfig{
 		TLSConfig:      tlsConfig,
 		QUICConfig:     l4QUICConfig(socks.KeepalivePeriod.Duration(), socks.InitialPacketSize),
 		Endpoint:       endpoint,
 		ConnectTimeout: 10 * time.Second,
-	})
+	}, 1)
 	if err != nil {
-		t.Fatalf("new l4 proxy: %v", err)
+		t.Fatalf("new l4 pool: %v", err)
 	}
-	defer l4Proxy.Close()
+	defer l4Pool.Close()
 
-	runtime, _, err := prepareL4SocksRuntime(l4Proxy, nil, 10*time.Second, 30*time.Second)
+	runtime, _, err := prepareL4SocksRuntime(l4Pool, nil, 10*time.Second, 30*time.Second)
 	if err != nil {
 		t.Fatalf("prepare runtime: %v", err)
 	}

@@ -140,7 +140,10 @@ func (a *txthinkingAdapter) ServeConn(conn net.Conn) error {
 // then pumps bytes in both directions.
 func (a *txthinkingAdapter) handleConnect(conn net.Conn, req *socks5.Request) error {
 	target := targetFromRequest(req)
-	ctx := context.Background()
+	// Carry the downstream client's source IP so the L4 pool can pin this flow to a shard
+	// (one of its independent shared connections), isolating a wedged connection to ~1/N of
+	// downstreams. A no-op for the L3/direct paths, which ignore it.
+	ctx := api.WithClientIP(context.Background(), clientIP(conn))
 
 	dialAddr, err := a.resolveDialAddr(ctx, target)
 	if err != nil {

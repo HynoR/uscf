@@ -56,6 +56,10 @@ type L4ProxyConfig struct {
 	// ConnectTimeout bounds establishing the shared QUIC connection (and clamps the
 	// per-dial stream-open attempt).
 	ConnectTimeout time.Duration
+	// Label, when set, tags this connection's WARP-interaction logs (established /
+	// torn down / wedged) so a single shard of an L4Pool is attributable. Empty for a
+	// lone connection, which then logs exactly as before.
+	Label string
 }
 
 // L4Proxy opens one HTTP/3 CONNECT stream per proxied TCP connection over a single
@@ -69,6 +73,7 @@ type L4Proxy struct {
 	endpoint          *net.UDPAddr
 	connectTimeout    time.Duration
 	streamOpenTimeout time.Duration
+	label             string // shard tag for logs when part of an L4Pool; "" for a lone connection
 
 	// dialSem is a context-aware single-flight (capacity 1) so concurrent dials that
 	// find no cached connection do not each dial a redundant one — the first builds it,
@@ -116,6 +121,7 @@ func NewL4Proxy(cfg L4ProxyConfig) (*L4Proxy, error) {
 		endpoint:          cfg.Endpoint,
 		connectTimeout:    cfg.ConnectTimeout,
 		streamOpenTimeout: streamOpenTimeout,
+		label:             cfg.Label,
 		dialSem:           make(chan struct{}, 1),
 	}, nil
 }
@@ -182,7 +188,7 @@ func (p *L4Proxy) dialConn(ctx context.Context) (*http3.ClientConn, error) {
 
 	udpConn, err := listenUDPForEndpoint(endpoint)
 	if err != nil {
-		slog.Warn("l4 could not open local UDP socket for shared connection", "endpoint", endpoint.String(), "error", err)
+		slog.Warn("l4 could not open local UDP socket for shared connection", p.logArgs("endpoint", endpoint.String(), "error", err)...)
 		return nil, err
 	}
 	quicConn, err := quic.Dial(dialCtx, udpConn, endpoint, p.tlsConfig, p.quicConfig)
@@ -190,7 +196,7 @@ func (p *L4Proxy) dialConn(ctx context.Context) (*http3.ClientConn, error) {
 		_ = udpConn.Close()
 		// The shared connection could not be (re)established — every flow fails until
 		// this succeeds, so surface it (not just the per-flow dial error the caller logs).
-		slog.Warn("l4 failed to establish shared QUIC connection to WARP", "endpoint", endpoint.String(), "error", err)
+		slog.Warn("l4 failed to establish shared QUIC connection to WARP", p.logArgs("endpoint", endpoint.String(), "error", err)...)
 		return nil, err
 	}
 	clientConn := (&http3.Transport{}).NewClientConn(quicConn)
@@ -209,7 +215,7 @@ func (p *L4Proxy) dialConn(ctx context.Context) (*http3.ClientConn, error) {
 
 	// Info (not Debug): establishing the shared connection is a discrete WARP-interaction
 	// event — pairs with the teardown log so a rebuild cycle is visible at the default level.
-	slog.Info("l4 shared QUIC connection established", "endpoint", endpoint.String(), "rebuilds_total", p.reconnects.Load())
+	slog.Info("l4 shared QUIC connection established", p.logArgs("endpoint", endpoint.String(), "rebuilds_total", p.reconnects.Load())...)
 	return clientConn, nil
 }
 
@@ -243,9 +249,10 @@ func (p *L4Proxy) closeConn(stale *http3.ClientConn) {
 	// a nil cause means it is still alive at the QUIC layer but stopped answering CONNECTs
 	// (app-level wedge), which points at the proxy service rather than the QUIC path.
 	slog.Info("l4 shared QUIC connection torn down; next dial rebuilds",
-		"cause", quicConnCloseCause(quicConn),
-		"uptime", uptime,
-		"rebuilds_total", rebuilds)
+		p.logArgs(
+			"cause", quicConnCloseCause(quicConn),
+			"uptime", uptime,
+			"rebuilds_total", rebuilds)...)
 	closeL4HTTP3(udpConn, quicConn)
 }
 
@@ -306,9 +313,19 @@ func (p *L4Proxy) noteConnFailure(clientConn *http3.ClientConn, ctx context.Cont
 	wedgedFor := time.Since(time.Unix(0, first))
 	if wedgedFor >= 2*p.connectTimeout {
 		slog.Warn("l4 shared connection stopped answering CONNECTs (wedged); forcing a rebuild",
-			"wedged_for", wedgedFor.Round(time.Second), "last_error", errString(cause))
+			p.logArgs("wedged_for", wedgedFor.Round(time.Second), "last_error", errString(cause))...)
 		p.closeConn(clientConn)
 	}
+}
+
+// logArgs prepends this connection's shard label (when it is one shard of an L4Pool)
+// to a slog argument list, so pooled shards are attributable in the WARP-interaction
+// logs while a lone connection (label "") logs exactly as before.
+func (p *L4Proxy) logArgs(args ...any) []any {
+	if p.label == "" {
+		return args
+	}
+	return append([]any{"shard", p.label}, args...)
 }
 
 // errString renders err for a log field, tolerating nil.

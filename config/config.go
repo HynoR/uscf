@@ -138,6 +138,7 @@ type SocksConfig struct {
 	L4HalfOpenTimeout    Duration `json:"l4_half_open_timeout"`   // L4模式半开TCP流的空闲上限:一方向结束后另一方向最多空闲多久就回收(随活动重置),避免滞留流占满共享连接的MAX_STREAMS;<=0取默认
 	L4ConnectionTimeout  Duration `json:"l4_connection_timeout"`  // L4模式建立连接/打开流的超时(与L3的connection_timeout隔离);<=0取默认
 	L4IdleTimeout        Duration `json:"l4_idle_timeout"`        // L4模式空闲流的超时(与L3的idle_timeout隔离)。L4每条空闲流占用稀缺的QUIC MAX_STREAMS额度,故默认显著短于L3;<=0取默认
+	L4PoolSize           int      `json:"l4_pool_size"`           // L4模式共享连接的分片数(故障隔离):把下游客户端按源IP哈希分摊到N条独立QUIC连接,一条卡死只波及~1/N的下游设备。默认1=单连接主线;封顶3;<1取1
 }
 
 // L4 UDP handling modes (socks.l4_udp). The L4 transport has no UDP path of its
@@ -196,6 +197,19 @@ const (
 	// connection's scarce MAX_STREAMS budget. A re-arming activity check means an actively
 	// transferring flow is never cut; only a truly idle one is reaped.
 	DefaultL4IdleTimeout = 60 * time.Second
+	// DefaultL4PoolSize is the L4 shared-connection shard count. 1 = the single-connection
+	// main line (no sharding) — the proven, robust default. Raising it (capped at
+	// MaxL4PoolSize) shards downstream clients across N independent connections by source-IP
+	// hash, so one wedged connection disrupts only ~1/N of downstreams instead of all of
+	// them. It is fault isolation, not capacity: a single connection already carries
+	// thousands of streams, so most deployments want 1. It is worth >1 only for a shared
+	// gateway serving many distinct downstream IPs that must not all stall together.
+	DefaultL4PoolSize = 1
+	// MaxL4PoolSize caps the L4 shard count. More shards means more egress identities and
+	// more independent connections to keep alive for a diminishing isolation benefit; 3
+	// keeps the blast radius at ~1/3 while staying close to the single-connection egress
+	// profile. Mirrored by api.maxL4PoolShards (the api package clamps defensively too).
+	MaxL4PoolSize = 3
 )
 
 // LoggingConfig 包含日志相关的配置
@@ -371,6 +385,7 @@ func GetDefaultSocksConfig() SocksConfig {
 		L4HalfOpenTimeout:    Duration(DefaultL4HalfOpenTimeout),
 		L4ConnectionTimeout:  Duration(DefaultL4ConnectionTimeout),
 		L4IdleTimeout:        Duration(DefaultL4IdleTimeout),
+		L4PoolSize:           DefaultL4PoolSize,
 	}
 }
 
@@ -446,6 +461,14 @@ func NormalizeSocksConfig(cfg SocksConfig) (SocksConfig, error) {
 	}
 	if normalized.L4IdleTimeout.Duration() <= 0 {
 		normalized.L4IdleTimeout = Duration(DefaultL4IdleTimeout)
+	}
+	// Clamp the L4 shard count to [1, MaxL4PoolSize]: <1 falls back to the single-connection
+	// main line; >max is capped so a misconfig can't fan out past the intended trade-off.
+	if normalized.L4PoolSize < 1 {
+		normalized.L4PoolSize = DefaultL4PoolSize
+	}
+	if normalized.L4PoolSize > MaxL4PoolSize {
+		normalized.L4PoolSize = MaxL4PoolSize
 	}
 	// Keep the L4 half-open reaper a SHORTENER: a half-open timeout larger than the idle
 	// timeout would re-arm the surviving direction LONGER than a fully-open flow, inverting
