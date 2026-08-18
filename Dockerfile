@@ -59,6 +59,10 @@ FROM runtime-base AS runtime-wg-run
 # call (`uscf wg register`).
 RUN apk add --no-cache ca-certificates
 
+# uscf writes the tunnel up/down state here and healthcheck.sh reads it back.
+# Pinned explicitly so both sides agree regardless of the binary's default.
+ENV USCF_TUNNEL_STATE_FILE=/tmp/uscf_tunnel_state
+
 COPY entrypoint-wg-run.sh /app/entrypoint-wg-run.sh
 COPY healthcheck.sh /app/healthcheck.sh
 
@@ -70,6 +74,10 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
 ENTRYPOINT ["/app/entrypoint-wg-run.sh"]
 
 FROM runtime-base AS runtime-regular
+
+# uscf writes the tunnel up/down state here and healthcheck.sh reads it back.
+# Pinned explicitly so both sides agree regardless of the binary's default.
+ENV USCF_TUNNEL_STATE_FILE=/tmp/uscf_tunnel_state
 
 COPY entrypoint.sh /app/entrypoint.sh
 COPY healthcheck.sh /app/healthcheck.sh

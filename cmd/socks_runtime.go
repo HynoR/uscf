@@ -42,6 +42,10 @@ func newSocksRuntime(
 	// The server is stateless and shared for the runtime's whole life (it holds no
 	// per-connection state), so it is built once here and never swapped.
 	r.server = serverFactory(r.DialContext)
+	// Claim the state file before anything can serve: a previous run killed while
+	// up leaves "up" on disk, and a healthcheck must not read that as a live
+	// tunnel while this process is still dialing.
+	publishTunnelState(false)
 	return r
 }
 
@@ -76,8 +80,14 @@ func (r *socksRuntime) drainDemand() {
 	}
 }
 
+// SetTunnelUp records whether the upstream is usable. Every transport (L3
+// MASQUE, L4 MASQUE, in-process WireGuard, SOCKS-only) drives this, so it is
+// also where the healthcheck state file is published — a transport cannot gain
+// a data plane without teaching the healthcheck about it.
 func (r *socksRuntime) SetTunnelUp(up bool) {
-	r.tunnelUp.Store(up)
+	if r.tunnelUp.Swap(up) != up {
+		publishTunnelState(up)
+	}
 }
 
 func (r *socksRuntime) IsTunnelUp() bool {

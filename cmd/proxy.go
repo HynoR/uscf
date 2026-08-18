@@ -1085,7 +1085,6 @@ func createTunDevice(localAddresses, dnsAddrs []netip.Addr, cmd *cobra.Command) 
 func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint net.Addr, tunDev tun.Device, tunNet *netstack.Net, socksRuntime *socksRuntime) <-chan struct{} {
 	readyCh := make(chan struct{})
 	var readyOnce sync.Once
-	writeTunnelStateSafe(tunnelStateDown)
 
 	// 从配置文件读取隧道参数
 	keepalivePeriod := config.AppConfig.Socks.KeepalivePeriod.Duration()
@@ -1116,13 +1115,11 @@ func startTunnel(cmd *cobra.Command, tlsConfig *tls.Config, endpoint net.Addr, t
 				socksRuntime.SetTunnelUp(true)
 				socksRuntime.drainDemand()
 			}
-			writeTunnelStateSafe(tunnelStateUp)
 			readyOnce.Do(func() {
 				close(readyCh)
 			})
 		},
 		OnDisconnected: func(err error) {
-			writeTunnelStateSafe(tunnelStateDown)
 			if socksRuntime == nil {
 				return
 			}
@@ -1353,6 +1350,9 @@ func runSocksServer(socksRuntime *socksRuntime, idleTimeout time.Duration, ready
 	if err != nil {
 		return fmt.Errorf("Failed to start SOCKS proxy: %v", err)
 	}
+	// Every transport funnels through here, so this is the one place that can
+	// mark the tunnel down for all of them once the proxy stops serving.
+	defer socksRuntime.SetTunnelUp(false)
 	logProxyReady(listener.Addr(), idleTimeout, readyInfo)
 
 	var connSeq atomic.Uint64

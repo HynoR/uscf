@@ -225,11 +225,37 @@ Team mode creates a new WG account:
 docker restart uscf-wg
 ```
 
+## Container Health Checks
+
+Each image ships the check that matches its data plane:
+
+| Image target | Entrypoint | Health check | What it proves |
+|---|---|---|---|
+| `runtime-regular` | `uscf proxy` (MASQUE L3, MASQUE L4, or `--wg`) | `healthcheck.sh` | Tunnel state file says `up`, then a real request through the SOCKS port returns 204 |
+| `runtime-wg-run` | `uscf proxy --wg --experimental` | `healthcheck.sh` | Same as above |
+| `runtime-wg` | `wg-quick up` + `uscf socks` | `healthcheck-wg-socks.sh` | Kernel interface is up, then a real request through the SOCKS port returns 204 |
+
+The tunnel state file is the only part that needs wiring. uscf writes `up`/`down`
+to `$USCF_TUNNEL_STATE_FILE` on every tunnel transition, and `healthcheck.sh`
+reads it back to fail fast when the tunnel is known-down instead of waiting out a
+proxy timeout. It is **opt-in**: with the variable unset uscf writes nothing (a
+plain CLI run leaves no files behind) and `healthcheck.sh` skips the state gate
+and goes straight to the connectivity probe. The images set it to
+`/tmp/uscf_tunnel_state`, so both sides agree by construction.
+
+The state follows the same signal that gates SOCKS dials, so it is identical
+across transports — MASQUE L3 reconnects, MASQUE L4, and the in-process
+WireGuard supervisor all report through it.
+
+Both checks honor `CONFIG_DIR` and probe the address from `socks.bind_address`,
+so relocating the config or binding to a specific IP does not make a healthy
+container look broken.
+
 ## Troubleshooting
 
 | Symptom | Check |
 |---|---|
-| usque container is unhealthy | Check `/tmp/uscf_tunnel_state` in the container and the SOCKS port in `config.json` |
+| usque container is unhealthy | Check `$USCF_TUNNEL_STATE_FILE` (`/tmp/uscf_tunnel_state` in the images) and the SOCKS bind address/port in `config.json`; see [Container Health Checks](#container-health-checks) |
 | usque upgrade flags appear ignored | Check `account_mode` in `key.json`; existing `premium` or `team` accounts ignore upgrade flags |
 | Team JWT file did nothing | Confirm the account is still free and the file is beside `config.json` as `jwt.txt` |
 | WG container fails at startup | Check for partial state in `/app/etc`, missing `--privileged`, missing IPv6 sysctls, or no detectable default IPv4 route |

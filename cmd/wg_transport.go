@@ -47,8 +47,9 @@ type wgTransportParams struct {
 // standalone wg account and serves it through the same SOCKS5 layer as the
 // MASQUE transports. It is the shared implementation behind `uscf proxy --wg`:
 // the caller is responsible for loading config, gating on --experimental, and
-// obtaining a validated account (see ensureWGAccount). The tunnel is single-shot
-// — there is no reconnect supervisor — so the SOCKS gate is marked up directly.
+// obtaining a validated account (see ensureWGAccount). Health is self-healed in
+// place by superviseWireGuard rather than by tearing the tunnel down and
+// reconnecting (see step 7).
 func runWireGuardTransport(cmd *cobra.Command, account config.WGAccount, flagOverrides []string, params wgTransportParams) error {
 	if params.mtu <= 0 {
 		params.mtu = defaultWGRunMTU
@@ -144,8 +145,6 @@ func runWireGuardTransport(cmd *cobra.Command, account config.WGAccount, flagOve
 		return err
 	}
 	socksRuntime.SetTunnelUp(true)
-	writeTunnelStateSafe(tunnelStateUp)
-	defer writeTunnelStateSafe(tunnelStateDown)
 
 	// 7. Reconnect supervisor (runtime parity with L3/L4 self-heal). wireguard-go
 	//    re-handshakes transient blips itself but pins the configured endpoint
@@ -155,8 +154,19 @@ func runWireGuardTransport(cmd *cobra.Command, account config.WGAccount, flagOve
 	//    across recovery (no device/TUN teardown). It also gates new SOCKS dials
 	//    and drains stale ones during an outage, like the MASQUE transports.
 	superCtx, stopSupervisor := context.WithCancel(context.Background())
-	defer stopSupervisor()
-	go superviseWireGuard(superCtx, wgDev, account, peerKey, socksRuntime, params.keepalive)
+	supervisorDone := make(chan struct{})
+	go func() {
+		defer close(supervisorDone)
+		superviseWireGuard(superCtx, wgDev, account, peerKey, socksRuntime, params.keepalive)
+	}()
+	// Stop and join the supervisor before recording the final state: it marks the
+	// tunnel up on recovery, so a recovery in flight when the server stops would
+	// otherwise leave the healthcheck claiming a tunnel that no longer exists.
+	defer func() {
+		stopSupervisor()
+		<-supervisorDone
+		socksRuntime.SetTunnelUp(false)
+	}()
 
 	readyInfo := proxyReadyInfo{
 		connectionTimeout: connectionTimeout,
@@ -407,7 +417,6 @@ func superviseWireGuard(ctx context.Context, dev *device.Device, account config.
 				down = false
 				backoff = wgInitialRecoveryBackoff
 				runtime.SetTunnelUp(true)
-				writeTunnelStateSafe(tunnelStateUp)
 				slog.Info("wireguard recovered", "down_for", time.Since(wedgedAt).Round(time.Second))
 			}
 			continue
@@ -424,7 +433,6 @@ func superviseWireGuard(ctx context.Context, dev *device.Device, account config.
 			down = true
 			wedgedAt = time.Now()
 			runtime.SetTunnelUp(false)
-			writeTunnelStateSafe(tunnelStateDown)
 			// The wedged session's flows are dead; reset them now so clients retry
 			// instead of hanging while we re-point the endpoint.
 			runtime.ResetTrackedConns()
